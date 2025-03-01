@@ -1,3 +1,105 @@
+### Version 2.0.2
+
+#### New Features:
+
+- **Robust Connection Recovery with Backoff Strategy**:
+  - Implemented an exponential backoff strategy (capped at 5 minutes) for reconnecting after failures.
+  - Improved connection lifecycle management to handle unstable network conditions.
+
+- **Connection Health Status Tracking**:
+  - Monitors the health of IMAP connections to detect failures and take corrective actions.
+  - Tracks last error messages and retry attempts for better diagnostics.
+
+- **Watchdog Thread for Monitoring IMAP Threads**:
+  - A dedicated watchdog thread ensures that all IMAP threads remain responsive and automatically restarts any dead connections.
+
+- **IDLE Timeouts and Periodic Connection Verifications**:
+  - Every 10 minutes, an IDLE timeout check is performed to verify the connection status.
+  - NOOP commands are sent after email processing to confirm connection health.
+
+- **New Prometheus Metrics**:
+  - `reconnect_attempts_total`: Tracks the number of reconnection attempts.
+  - `idle_timeouts_total`: Counts occurrences of IDLE timeouts.
+  - `active_connections`: Gauge metric indicating the number of active IMAP connections.
+
+- **New Web API Endpoint for Resetting Connections**:
+  - Introduced `/reset/<email_user>/<folder>` to manually reset IMAP connections for specific accounts and folders.
+
+- **Global Shutdown Flag**:
+  - Ensures a cleaner termination of the service by signaling all threads to exit gracefully.
+
+- **Console Logging Handler**:
+  - Improved debugging visibility by adding a console logging option for real-time monitoring.
+
+- **Configurable Maximum Retry Attempts and Backoff Strategy**:
+  - Allows fine-tuning of retry limits and backoff timing for better resilience in unstable environments.
+
+#### Bug Fixes:
+
+- **IMAP Connection Freezing After Errors**:
+  - Fixed an issue where IMAP connections could freeze and become unresponsive after encountering certain errors.
+
+- **Thread Deadlocks in Failed Connections**:
+  - Addressed deadlock scenarios where failed connections could cause entire threads to hang indefinitely.
+
+- **Proper Release of Socket Resources**:
+  - Ensured that sockets are correctly released when errors occur, preventing resource exhaustion.
+
+- **Improved Handling of IDLE Mode Disconnections**:
+  - Now properly detects and handles server disconnections during IDLE mode to avoid missed emails.
+
+- **Prevented Email Processing on Unhealthy Connections**:
+  - Ensured that email fetching only occurs when connections are verified to be healthy.
+
+- **Improved Error Handling in IMAP Operations**:
+  - Strengthened error handling in critical IMAP functions to avoid unexpected failures.
+
+- **Proper Cleanup in Error Paths**:
+  - Ensured all temporary states and resources are cleaned up when errors occur.
+
+- **Resolved Blocking Sockets Preventing Proper Shutdown**:
+  - Fixed an issue where certain socket operations could block indefinitely, preventing graceful shutdown.
+
+#### Changes:
+
+- **Improved Error Handling with Contextual Logging**:
+  - Enhanced logging to provide more context on errors, including thread identification.
+
+- **Enhanced Shutdown Sequence**:
+  - Ensured that all threads and network resources are properly cleaned up during termination.
+
+- **Modified Initial Notification Test Behavior**:
+  - Startup no longer fails if the initial notification test encounters a warning; it now logs a warning instead of an error.
+
+- **Enhanced `/status` API Endpoint**:
+  - The status endpoint now provides more detailed connection health information.
+
+- **Translated Italian Comments to English**:
+  - Standardized all code comments in English for consistency.
+
+- **Implemented Proper Retry System**:
+  - Added an exponential backoff mechanism for reconnections, improving reliability.
+
+#### Enhancements:
+
+- **Improved Socket Resource Management**:
+  - Optimized the allocation and release of socket resources to prevent leaks.
+
+- **Thread Safety During Shutdown**:
+  - Ensured that shutdown operations do not interfere with active threads.
+
+- **Better Error Recovery and Resilience**:
+  - Improved handling of network failures to recover gracefully without service interruption.
+
+- **Enhanced Email Fetching and Parsing Error Handling**:
+  - Strengthened parsing logic to handle edge cases and avoid crashes.
+
+- **Improved Connection Lifecycle Management**:
+  - Ensured that connections are created, monitored, and closed in a structured manner.
+
+- **Overall Stability in Unreliable Network Conditions**:
+  - Significant improvements in handling network timeouts, disconnections, and transient failures.
+
 ### Version 2.0.1
 
 #### Enhancements:
