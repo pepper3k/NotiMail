@@ -1,0 +1,12 @@
+services:
+  notimail:
+    build: .
+    container_name: notimail
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8080:8080"   # Flask web interface
+      - "8000:8000"   # Prometheus metrics
