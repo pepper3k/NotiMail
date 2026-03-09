@@ -1,6 +1,8 @@
 services:
   notimail:
-    build: .
+    image: ghcr.io/pepper3k/notimail:main
+    # To build locally instead, comment out 'image' and uncomment 'build':
+    # build: .
     container_name: notimail
     restart: unless-stopped
     volumes:
