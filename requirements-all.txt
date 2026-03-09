@@ -1,0 +1,4 @@
+-r requirements.txt
+flask>=3.0.0
+prometheus_client>=0.19.0
+apprise>=1.6.0
