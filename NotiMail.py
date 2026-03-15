@@ -340,8 +340,9 @@ def initial_checks():
     try:
         with DatabaseHandler(db_path) as db:
             db.add_email("test", "test", 0)
-            db.cursor.execute("DELETE FROM processed_emails WHERE email_account=? AND uid=?", ("test", "test"))
-            db.connection.commit()
+            conn = db._get_conn()
+            conn.execute("DELETE FROM processed_emails WHERE email_account=? AND uid=?", ("test", "test"))
+            conn.commit()
     except Exception as e:
         print("Error: unable to write to database:", e)
         logging.error("Error: unable to write to database: " + str(e))
