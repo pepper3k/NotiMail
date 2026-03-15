@@ -138,7 +138,12 @@ def main():
     flask_host = config.get('GENERAL', 'FlaskHost', fallback=None)
     flask_port_str = config.get('GENERAL', 'FlaskPort', fallback=None)
 
-    multi_handler = MultiIMAPHandler(accounts, metrics=metrics, db_path=db_path)
+    # account_loader is called by the watchdog every 60s to detect new/removed accounts
+    def _account_loader():
+        return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
+
+    multi_handler = MultiIMAPHandler(
+        accounts, metrics=metrics, db_path=db_path, account_loader=_account_loader)
 
     if flask_host and flask_port_str:
         flask_port = int(flask_port_str)

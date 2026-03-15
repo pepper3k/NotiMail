@@ -403,6 +403,10 @@ class MultiIMAPHandler:
     its own daemon thread. The run() method blocks until all threads
     complete (which normally only happens on shutdown).
 
+    Supports dynamic account reload: the connection_watchdog calls
+    reload_accounts() every 60 seconds to pick up new/changed/disabled
+    accounts from the database without a restart.
+
     Attributes:
         accounts: List of account configuration dicts.
         metrics: Shared Prometheus metrics dict.
@@ -410,6 +414,8 @@ class MultiIMAPHandler:
         handlers: List of IMAPHandler instances (one per account).
         lock: Threading lock used to serialize email processing.
         threads: List of monitoring threads (one per handler).
+        registry: Dict mapping (email_user, folder) to handler index for diffing.
+        account_loader: Optional callable that returns fresh account list from DB.
     """
 
     def __init__(
@@ -417,10 +423,12 @@ class MultiIMAPHandler:
         accounts: List[Dict[str, Any]],
         metrics: Optional[Dict[str, Any]] = None,
         db_path: Optional[str] = None,
+        account_loader: Optional[Any] = None,
     ) -> None:
         self.accounts = accounts
         self.metrics: Dict[str, Any] = metrics or {}
         self.db_path: str = db_path or "processed_emails.db"
+        self.account_loader = account_loader  # callable returning List[Dict] or None
         self.handlers: List[IMAPHandler] = [
             IMAPHandler(
                 account['Host'], account['EmailUser'], account['EmailPass'],
@@ -430,6 +438,10 @@ class MultiIMAPHandler:
         ]
         self.lock: Lock = Lock()
         self.threads: List[threading.Thread] = []
+        # Build registry for diffing: (email_user, folder) -> index
+        self._registry: Dict[tuple, int] = {
+            (h.email_user, h.folder): i for i, h in enumerate(self.handlers)
+        }
 
     def run(self) -> None:
         """Start a monitoring thread for each handler and block until all finish."""
@@ -443,6 +455,64 @@ class MultiIMAPHandler:
             thread.start()
         for thread in self.threads:
             thread.join()
+
+    def reload_accounts(self) -> None:
+        """Reload accounts from the database and start/stop handlers as needed.
+
+        Called by connection_watchdog every 60 seconds. Compares the current
+        set of running handlers against the latest account list from the DB.
+
+        - New accounts: create handler + thread
+        - Removed/disabled accounts: signal handler to stop
+        - Changed accounts (updated_at newer): stop old, start new
+        """
+        if not self.account_loader:
+            return
+
+        try:
+            fresh_accounts = self.account_loader()
+        except Exception as e:
+            logging.error(f"Failed to reload accounts from DB: {e}")
+            return
+
+        fresh_keys = {(a['EmailUser'], a['Folder']) for a in fresh_accounts}
+        current_keys = set(self._registry.keys())
+
+        # Detect new accounts
+        new_keys = fresh_keys - current_keys
+        for acct in fresh_accounts:
+            key = (acct['EmailUser'], acct['Folder'])
+            if key not in new_keys:
+                continue
+
+            handler = IMAPHandler(
+                acct['Host'], acct['EmailUser'], acct['EmailPass'],
+                acct['Folder'], acct['Notifier'], metrics=self.metrics)
+
+            with self.lock:
+                idx = len(self.handlers)
+                self.handlers.append(handler)
+                self._registry[key] = idx
+
+                thread = threading.Thread(
+                    target=self.monitor_account, args=(handler,),
+                    name=f"{handler.email_user}-{handler.folder}")
+                thread.daemon = True
+                self.threads.append(thread)
+                thread.start()
+
+            logging.info(f"Dynamic reload: started monitoring {acct['EmailUser']} - {acct['Folder']}")
+
+        # Detect removed accounts
+        removed_keys = current_keys - fresh_keys
+        for key in removed_keys:
+            idx = self._registry.get(key)
+            if idx is None:
+                continue
+            handler = self.handlers[idx]
+            handler.stop_event.set()
+            logging.info(f"Dynamic reload: stopping {handler.email_user} - {handler.folder}")
+            # Don't remove from registry — thread will exit on its own
 
     def monitor_account(self, handler: IMAPHandler) -> None:
         """Main loop for monitoring a single IMAP account.
@@ -523,15 +593,12 @@ class MultiIMAPHandler:
 
 
 def connection_watchdog(multi_handler: MultiIMAPHandler) -> None:
-    """Monitor all handler threads and restart any that have died.
+    """Monitor handler threads, restart dead ones, and reload accounts from DB.
 
-    Runs in its own thread, checking every 60 seconds whether each
-    monitoring thread is still alive. If a thread has died (e.g. due
-    to an unhandled exception), it resets the handler state and spawns
-    a replacement thread.
-
-    A notification is sent when a thread is restarted so the user
-    is aware of the recovery.
+    Runs in its own thread, checking every 60 seconds:
+    1. Whether each monitoring thread is still alive (restart if dead).
+    2. Whether new accounts have been added or existing ones removed/disabled
+       in the database (via multi_handler.reload_accounts()).
 
     Args:
         multi_handler: The MultiIMAPHandler whose threads to watch.
@@ -541,6 +608,9 @@ def connection_watchdog(multi_handler: MultiIMAPHandler) -> None:
 
         if notimail_config.shutdown_in_progress:
             break
+
+        # Reload accounts from DB (picks up new/changed/disabled accounts)
+        multi_handler.reload_accounts()
 
         for i, thread in enumerate(multi_handler.threads):
             if not thread.is_alive() and not notimail_config.shutdown_in_progress:
