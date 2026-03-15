@@ -5,8 +5,10 @@ Implements the strategy pattern for sending push notifications via
 multiple services: ntfy, Pushover, Gotify, and Apprise.
 """
 
+import configparser
 import logging
 import time
+from typing import Any, List, Optional, Tuple
 
 import requests
 
@@ -18,29 +20,66 @@ if apprise_available:
 
 
 class NotificationProvider:
-    """Base class for all notification providers."""
-    def send_notification(self, mail_from, mail_subject):
+    """Base class (interface) for all notification providers.
+
+    Subclasses must override send_notification() to deliver a push
+    notification for an incoming email.
+    """
+
+    def send_notification(self, mail_from: str, mail_subject: str) -> None:
+        """Send a notification for a new email.
+
+        Args:
+            mail_from: The sender address (From header).
+            mail_subject: The email subject line.
+
+        Raises:
+            NotImplementedError: Always; subclasses must override.
+        """
         raise NotImplementedError("Subclasses must implement this method")
 
 
 class NTFYNotificationProvider(NotificationProvider):
-    """Send notifications via ntfy (https://ntfy.sh)."""
-    def __init__(self, ntfy_data, errors_metric=None):
-        self.ntfy_data = ntfy_data  # list of (url, token) tuples
+    """Send notifications via ntfy (https://ntfy.sh).
+
+    Supports multiple ntfy endpoints, each with an optional bearer token.
+    A 2-second delay is inserted between requests to avoid rate limiting.
+    """
+
+    def __init__(
+        self,
+        ntfy_data: List[Tuple[str, Optional[str]]],
+        errors_metric: Optional[Any] = None,
+    ) -> None:
+        """Initialize the ntfy provider.
+
+        Args:
+            ntfy_data: List of (url, token) tuples. Token may be None
+                       if the ntfy topic does not require authentication.
+            errors_metric: Prometheus Counter (or DummyMetric) for error tracking.
+        """
+        self.ntfy_data = ntfy_data
         self.errors_metric = errors_metric
 
-    def send_notification(self, mail_from, mail_subject):
+    def send_notification(self, mail_from: str, mail_subject: str) -> None:
+        """POST the notification to each configured ntfy endpoint.
+
+        Args:
+            mail_from: The sender address (From header).
+            mail_subject: The email subject line.
+        """
         mail_subject = mail_subject if mail_subject is not None else "No Subject"
         mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        encoded_from = mail_from.encode('utf-8')
-        encoded_subject = mail_subject.encode('utf-8')
+        encoded_from: bytes = mail_from.encode('utf-8')
+        encoded_subject: bytes = mail_subject.encode('utf-8')
 
         for ntfy_url, token in self.ntfy_data:
-            headers = {"Title": encoded_subject}
+            headers: dict = {"Title": encoded_subject}
             if token:
                 headers["Authorization"] = f"Bearer {token}"
             try:
-                response = requests.post(ntfy_url, data=encoded_from, headers=headers)
+                response: requests.Response = requests.post(
+                    ntfy_url, data=encoded_from, headers=headers)
                 if response.status_code == 200:
                     logging.info(f"Notification sent successfully to {ntfy_url} via ntfy")
                 else:
@@ -52,21 +91,41 @@ class NTFYNotificationProvider(NotificationProvider):
                 if self.errors_metric:
                     self.errors_metric.inc()
             finally:
+                # Rate-limit delay between ntfy endpoint requests
                 time.sleep(2)
 
 
 class PushoverNotificationProvider(NotificationProvider):
     """Send notifications via Pushover (https://pushover.net)."""
-    def __init__(self, api_token, user_key, errors_metric=None):
+
+    def __init__(
+        self,
+        api_token: str,
+        user_key: str,
+        errors_metric: Optional[Any] = None,
+    ) -> None:
+        """Initialize the Pushover provider.
+
+        Args:
+            api_token: Pushover application API token.
+            user_key: Pushover user/group key.
+            errors_metric: Prometheus Counter (or DummyMetric) for error tracking.
+        """
         self.api_token = api_token
         self.user_key = user_key
-        self.pushover_url = "https://api.pushover.net/1/messages.json"
+        self.pushover_url: str = "https://api.pushover.net/1/messages.json"
         self.errors_metric = errors_metric
 
-    def send_notification(self, mail_from, mail_subject):
+    def send_notification(self, mail_from: str, mail_subject: str) -> None:
+        """POST the notification to the Pushover API.
+
+        Args:
+            mail_from: The sender address (From header).
+            mail_subject: The email subject line.
+        """
         mail_subject = mail_subject if mail_subject is not None else "No Subject"
         mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        message = f"From: {mail_from}\nSubject: {mail_subject}"
+        message: str = f"From: {mail_from}\nSubject: {mail_subject}"
 
         data = {
             "token": self.api_token,
@@ -75,7 +134,7 @@ class PushoverNotificationProvider(NotificationProvider):
         }
 
         try:
-            response = requests.post(self.pushover_url, data=data)
+            response: requests.Response = requests.post(self.pushover_url, data=data)
             if response.status_code == 200:
                 logging.info("Notification sent successfully via Pushover")
             else:
@@ -90,23 +149,43 @@ class PushoverNotificationProvider(NotificationProvider):
 
 class GotifyNotificationProvider(NotificationProvider):
     """Send notifications via Gotify (https://gotify.net)."""
-    def __init__(self, gotify_url, gotify_token, errors_metric=None):
+
+    def __init__(
+        self,
+        gotify_url: str,
+        gotify_token: str,
+        errors_metric: Optional[Any] = None,
+    ) -> None:
+        """Initialize the Gotify provider.
+
+        Args:
+            gotify_url: Base URL of the Gotify server message endpoint.
+            gotify_token: Application token for authentication.
+            errors_metric: Prometheus Counter (or DummyMetric) for error tracking.
+        """
         self.gotify_url = gotify_url
         self.gotify_token = gotify_token
         self.errors_metric = errors_metric
 
-    def send_notification(self, mail_from, mail_subject):
+    def send_notification(self, mail_from: str, mail_subject: str) -> None:
+        """POST the notification as JSON to the Gotify server.
+
+        Args:
+            mail_from: The sender address (From header).
+            mail_subject: The email subject line.
+        """
         mail_subject = mail_subject if mail_subject is not None else "No Subject"
         mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        message = f"From: {mail_from}\nSubject: {mail_subject}"
-        url_with_token = f"{self.gotify_url}?token={self.gotify_token}"
+        message: str = f"From: {mail_from}\nSubject: {mail_subject}"
+        # Append the token as a query parameter for Gotify authentication
+        url_with_token: str = f"{self.gotify_url}?token={self.gotify_token}"
         payload = {
             "title": mail_subject,
             "message": message,
             "priority": 5
         }
         try:
-            response = requests.post(url_with_token, json=payload)
+            response: requests.Response = requests.post(url_with_token, json=payload)
             if response.status_code == 200:
                 logging.info("Notification sent successfully via Gotify")
             else:
@@ -121,88 +200,139 @@ class GotifyNotificationProvider(NotificationProvider):
 
 if apprise_available:
     class AppriseNotificationProvider(NotificationProvider):
-        """Send notifications via Apprise (supports 100+ services)."""
-        def __init__(self, apprise_config):
+        """Send notifications via Apprise (supports 100+ services).
+
+        Apprise is a universal notification library that can deliver to
+        Slack, Telegram, Discord, email, and many other services via URLs.
+        """
+
+        def __init__(self, apprise_config: List[str]) -> None:
+            """Initialize the Apprise provider.
+
+            Args:
+                apprise_config: List of Apprise service URL strings
+                                (e.g. ["slack://token", "tgram://bot_token/chat_id"]).
+            """
             self.apprise = apprise_lib.Apprise()
             for service_url in apprise_config:
                 self.apprise.add(service_url.strip())
 
-        def send_notification(self, mail_from, mail_subject):
+        def send_notification(self, mail_from: str, mail_subject: str) -> None:
+            """Dispatch the notification through all configured Apprise services.
+
+            Args:
+                mail_from: The sender address (From header).
+                mail_subject: The email subject line.
+            """
             mail_subject = mail_subject if mail_subject is not None else "No Subject"
             mail_from = mail_from if mail_from is not None else "Unknown Sender"
-            message = f"{mail_from}"
+            message: str = f"{mail_from}"
             if not self.apprise.notify(title=mail_subject, body=message):
                 logging.error("Failed to send notification via Apprise.")
 
 
 class Notifier:
-    """Aggregates multiple notification providers and sends to all of them."""
-    def __init__(self, providers):
+    """Aggregates multiple notification providers and sends to all of them.
+
+    Acts as a fan-out dispatcher: when send_notification() is called,
+    every registered provider is invoked in sequence.
+    """
+
+    def __init__(self, providers: List[NotificationProvider]) -> None:
+        """Initialize the notifier.
+
+        Args:
+            providers: List of NotificationProvider instances to dispatch to.
+        """
         self.providers = providers
 
-    def send_notification(self, mail_from, mail_subject):
+    def send_notification(self, mail_from: str, mail_subject: str) -> None:
+        """Send a notification via all registered providers.
+
+        Args:
+            mail_from: The sender address (From header).
+            mail_subject: The email subject line.
+        """
         for provider in self.providers:
             provider.send_notification(mail_from, mail_subject)
 
 
-def parse_notification_providers(config, account_name=None, errors_metric=None):
+def parse_notification_providers(
+    config: configparser.ConfigParser,
+    account_name: Optional[str] = None,
+    errors_metric: Optional[Any] = None,
+) -> List[NotificationProvider]:
     """Build a list of notification providers from config.ini sections.
 
+    Scans the config for NTFY, PUSHOVER, GOTIFY, and APPRISE sections
+    and instantiates the corresponding provider classes.
+
+    Provider sections can be global (e.g. [NTFY]) or per-account
+    (e.g. [NTFY:account1]). When account_name is set, only sections
+    suffixed with that account are loaded; otherwise only global
+    (un-suffixed) sections are used.
+
     Args:
-        config: ConfigParser instance
-        account_name: If set, only load providers for this account (e.g. "account1").
-                     If None, load global providers (sections without ':').
-        errors_metric: Prometheus error counter (or DummyMetric) passed to providers.
+        config: ConfigParser instance with the full config.ini contents.
+        account_name: If set, only load providers for this account
+                     (e.g. "account1"). If None, load global providers
+                     (sections without ':').
+        errors_metric: Prometheus error counter (or DummyMetric) passed
+                      to providers for error tracking.
 
     Returns:
-        List of NotificationProvider instances.
+        List of NotificationProvider instances ready to send notifications.
     """
-    providers = []
+    providers: List[NotificationProvider] = []
 
+    # Filter sections to either per-account or global, depending on account_name
     if account_name:
         sections_to_check = [s for s in config.sections() if s.endswith(f":{account_name}")]
     else:
         sections_to_check = [s for s in config.sections() if ':' not in s]
 
-    # NTFY providers
+    # --- NTFY providers ---
+    # Each NTFY section can contain multiple URL/Token pairs (Url1, Token1, Url2, Token2, etc.)
     ntfy_sections = [s for s in sections_to_check if s.startswith('NTFY')]
-    ntfy_data = []
+    ntfy_data: List[Tuple[str, Optional[str]]] = []
     for section in ntfy_sections:
         for key in config[section]:
             if key.lower().startswith("url"):
-                url = config[section][key]
-                index = key[3:]
-                token_key = f"Token{index}"
-                token = config[section].get(token_key, None)
+                url: str = config[section][key]
+                # Extract the numeric suffix to find the matching Token key
+                # e.g. "Url1" -> suffix "1" -> look for "Token1"
+                index: str = key[3:]
+                token_key: str = f"Token{index}"
+                token: Optional[str] = config[section].get(token_key, None)
                 ntfy_data.append((url, token))
     if ntfy_data:
         providers.append(NTFYNotificationProvider(ntfy_data, errors_metric))
 
-    # Pushover provider
+    # --- Pushover provider (at most one) ---
     pushover_sections = [s for s in sections_to_check if s.startswith('PUSHOVER')]
     for section in pushover_sections:
         if 'ApiToken' in config[section] and 'UserKey' in config[section]:
-            api_token = config[section]['ApiToken']
-            user_key = config[section]['UserKey']
+            api_token: str = config[section]['ApiToken']
+            user_key: str = config[section]['UserKey']
             providers.append(PushoverNotificationProvider(api_token, user_key, errors_metric))
-            break
+            break  # Only one Pushover provider is supported
 
-    # Gotify provider
+    # --- Gotify provider (at most one) ---
     gotify_sections = [s for s in sections_to_check if s.startswith('GOTIFY')]
     for section in gotify_sections:
         if 'Url' in config[section] and 'Token' in config[section]:
-            gotify_url = config[section]['Url']
-            gotify_token = config[section]['Token']
+            gotify_url: str = config[section]['Url']
+            gotify_token: str = config[section]['Token']
             providers.append(GotifyNotificationProvider(gotify_url, gotify_token, errors_metric))
-            break
+            break  # Only one Gotify provider is supported
 
-    # Apprise providers
+    # --- Apprise providers (at most one) ---
     if apprise_available:
         apprise_sections = [s for s in sections_to_check if s.startswith('APPRISE')]
         for section in apprise_sections:
             if 'urls' in config[section]:
-                apprise_urls = config[section]['urls'].split(',')
+                apprise_urls: List[str] = config[section]['urls'].split(',')
                 providers.append(AppriseNotificationProvider(apprise_urls))
-                break
+                break  # Only one Apprise provider is supported
 
     return providers

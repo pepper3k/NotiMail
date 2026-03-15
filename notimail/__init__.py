@@ -12,4 +12,4 @@ This package contains the modular components of NotiMail:
 - migrate: Config.ini to database migration
 """
 
-__version__ = "3.0.0"
+__version__: str = "3.0.0"

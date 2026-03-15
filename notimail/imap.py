@@ -14,7 +14,9 @@ import threading
 import time
 from email import policy
 from email.parser import BytesParser
+from email.message import EmailMessage
 from threading import Lock
+from typing import Any, Dict, List, Optional
 
 import notimail.config as notimail_config
 from notimail.config import (
@@ -22,18 +24,46 @@ from notimail.config import (
     RETRY_DELAY, IDLE_TIMEOUT,
 )
 from notimail.database import DatabaseHandler
+from notimail.notifications import Notifier
 
 
 class EmailProcessor:
-    """Fetches unseen emails from an IMAP connection and sends notifications."""
-    def __init__(self, mail, email_account, notifier, db_path, metrics):
+    """Fetches unseen emails from an IMAP connection and sends notifications.
+
+    Given an authenticated IMAP connection that has already selected a
+    folder, this class searches for UNSEEN messages, parses them, fires
+    notifications, and records them in the database so they are not
+    re-processed.
+
+    Attributes:
+        mail: An authenticated imaplib.IMAP4_SSL instance with a folder selected.
+        email_account: Identifier for the IMAP account (e.g. user@example.com).
+        notifier: The Notifier instance used to dispatch push notifications.
+        db_path: Filesystem path to the SQLite database.
+        metrics: Dict of Prometheus metric objects (or DummyMetric stubs).
+    """
+
+    def __init__(
+        self,
+        mail: imaplib.IMAP4_SSL,
+        email_account: str,
+        notifier: Notifier,
+        db_path: str,
+        metrics: Dict[str, Any],
+    ) -> None:
         self.mail = mail
         self.email_account = email_account
         self.notifier = notifier
         self.db_path = db_path
         self.metrics = metrics
 
-    def fetch_unseen_emails(self):
+    def fetch_unseen_emails(self) -> List[bytes]:
+        """Search for UNSEEN emails in the currently selected folder.
+
+        Returns:
+            A list of IMAP UID byte-strings (e.g. [b'123', b'456']).
+            Returns an empty list on error or if none are found.
+        """
         try:
             status, messages = self.mail.uid('search', None, "UNSEEN")
             if status != 'OK':
@@ -44,20 +74,43 @@ class EmailProcessor:
             logging.error(f"Error fetching unseen emails: {str(e)}")
             return []
 
-    def parse_email(self, raw_email):
+    def parse_email(self, raw_email: bytes) -> EmailMessage:
+        """Parse raw email bytes into a structured EmailMessage object.
+
+        Args:
+            raw_email: The raw RFC 2822 message bytes.
+
+        Returns:
+            A parsed email.message.EmailMessage instance.
+        """
         return BytesParser(policy=policy.default).parsebytes(raw_email)
 
-    def process(self):
+    def process(self) -> None:
+        """Fetch all unseen emails, send notifications, and record them.
+
+        For each unseen email that has not already been notified:
+        1. Fetch the message body (using BODY.PEEK[] to avoid marking as read).
+        2. Parse the From and Subject headers.
+        3. Send a push notification via the configured Notifier.
+        4. Record the UID in the database with notified=1.
+
+        After processing, old database records are pruned.
+
+        Raises:
+            Exception: Re-raises any exception from the outer try block
+                      so the caller (IMAPHandler) can detect failures.
+        """
         logging.info("Fetching the latest email...")
         try:
             with DatabaseHandler(self.db_path) as db_handler:
                 for message in self.fetch_unseen_emails():
-                    uid = message.decode('utf-8')
+                    uid: str = message.decode('utf-8')
                     if db_handler.is_email_notified(self.email_account, uid):
                         logging.info(f"Email UID {uid} already processed and notified, skipping...")
                         continue
 
                     try:
+                        # BODY.PEEK[] fetches the full message without setting \Seen
                         _, msg = self.mail.uid('fetch', message, '(BODY.PEEK[])')
                         if not msg or msg[0] is None:
                             logging.warning(f"Failed to fetch email with UID {uid}")
@@ -67,9 +120,9 @@ class EmailProcessor:
                             if isinstance(response_part, tuple):
                                 with self.metrics['PROCESSING_TIME'].time():
                                     try:
-                                        email_message = self.parse_email(response_part[1])
-                                        sender = email_message.get('From')
-                                        subject = email_message.get('Subject')
+                                        email_message: EmailMessage = self.parse_email(response_part[1])
+                                        sender: Optional[str] = email_message.get('From')
+                                        subject: Optional[str] = email_message.get('Subject')
                                         logging.info(f"Processing Email - UID: {uid}, Sender: {sender}, Subject: {subject}")
 
                                         try:
@@ -88,6 +141,7 @@ class EmailProcessor:
                         logging.error(f"Error fetching email with UID {uid}: {str(e)}")
                         self.metrics['ERRORS'].inc()
 
+                # Prune old records to keep the database lean
                 db_handler.delete_old_emails()
         except Exception as e:
             logging.error(f"Error in process method: {str(e)}")
@@ -96,29 +150,82 @@ class EmailProcessor:
 
 
 class IMAPHandler:
-    """Manages a single IMAP IDLE connection for one account/folder pair."""
-    def __init__(self, host, email_user, email_pass, folder="inbox", notifier=None, metrics=None):
+    """Manages a single IMAP IDLE connection for one account/folder pair.
+
+    Handles connecting, entering IMAP IDLE mode, detecting new mail
+    via SELECT-based polling, and graceful shutdown via stop_event
+    and the global shutdown socket.
+
+    Attributes:
+        host: IMAP server hostname.
+        email_user: IMAP login username / email address.
+        email_pass: IMAP login password.
+        folder: Mailbox folder to monitor (default: "inbox").
+        notifier: Notifier instance for dispatching push notifications.
+        metrics: Dict of Prometheus metric objects (or DummyMetric stubs).
+        mail: The active imaplib.IMAP4_SSL connection, or None if disconnected.
+        last_check: Datetime of the last successful IDLE cycle.
+        last_error: String description of the most recent error, or None.
+        retry_count: Number of consecutive failed connection attempts.
+        healthy: False after an unrecoverable error; triggers reconnection.
+        stop_event: Threading Event to signal this handler to shut down.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        email_user: str,
+        email_pass: str,
+        folder: str = "inbox",
+        notifier: Optional[Notifier] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.host = host
         self.email_user = email_user
         self.email_pass = email_pass
         self.folder = folder
         self.notifier = notifier
-        self.metrics = metrics or {}
-        self.mail = None
-        self.last_check = None
-        self.last_error = None
-        self.retry_count = 0
-        self.healthy = True
-        self.stop_event = threading.Event()
+        self.metrics: Dict[str, Any] = metrics or {}
+        self.mail: Optional[imaplib.IMAP4_SSL] = None
+        self.last_check: Optional[datetime.datetime] = None
+        self.last_error: Optional[str] = None
+        self.retry_count: int = 0
+        self.healthy: bool = True
+        self.stop_event: threading.Event = threading.Event()
 
-    def _count_active_connections(self, all_handlers):
-        """Count how many handlers have active IMAP connections."""
+    def _count_active_connections(self, all_handlers: List["IMAPHandler"]) -> int:
+        """Count how many handlers have active IMAP connections.
+
+        Args:
+            all_handlers: The full list of IMAPHandler instances.
+
+        Returns:
+            The number of handlers whose mail attribute is not None.
+        """
         return sum(1 for h in all_handlers if h.mail is not None)
 
-    def connect(self, all_handlers=None):
+    def connect(self, all_handlers: Optional[List["IMAPHandler"]] = None) -> bool:
+        """Establish or verify the IMAP connection.
+
+        If an existing connection is present, sends a NOOP to verify it
+        is still alive. If the connection is stale or absent, creates a
+        new IMAP4_SSL connection, logs in, and selects the folder.
+
+        On the first failure, a notification is sent to alert the user
+        about the connection problem.
+
+        Args:
+            all_handlers: Optional list of all handlers, used to update
+                         the active-connections Prometheus gauge.
+
+        Returns:
+            True if the connection is alive and the folder is selected,
+            False if the connection attempt failed.
+        """
         if notimail_config.shutdown_in_progress or self.stop_event.is_set():
             return False
 
+        # Check if existing connection is still alive via NOOP
         if self.mail is not None:
             try:
                 status, _ = self.mail.noop()
@@ -128,6 +235,7 @@ class IMAPHandler:
             except Exception as e:
                 logging.warning(f"[{self.email_user} - {self.folder}] Connection check failed: {str(e)}")
 
+            # Existing connection is dead; clean it up
             try:
                 self.mail.close()
                 self.mail.logout()
@@ -138,6 +246,7 @@ class IMAPHandler:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
 
+        # Establish a new connection
         try:
             logging.info(f"[{self.email_user} - {self.folder}] Connecting to IMAP server...")
             self.mail = imaplib.IMAP4_SSL(self.host, 993)
@@ -160,6 +269,7 @@ class IMAPHandler:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
             logging.error(f"[{self.email_user} - {self.folder}] Connection failed (attempt {self.retry_count}): {str(e)}")
+            # Notify on first failure only to avoid notification spam
             if self.notifier and self.retry_count == 1:
                 try:
                     self.notifier.send_notification(
@@ -169,22 +279,41 @@ class IMAPHandler:
                     pass
             return False
 
-    def idle(self):
+    def idle(self) -> bool:
+        """Enter IMAP IDLE mode and wait for new mail or timeout.
+
+        Sends the IDLE command directly on the socket (imaplib does not
+        natively support IDLE). Uses select() to multiplex between the
+        IMAP socket and the global shutdown socket, allowing the thread
+        to wake up immediately on shutdown.
+
+        The IDLE loop runs for at most IDLE_TIMEOUT seconds (default 600s),
+        checking every 30 seconds. This periodic exit allows the caller
+        to verify the connection is still healthy.
+
+        Returns:
+            True if new mail was detected or the timeout was reached
+            (caller should process emails in both cases).
+            False if shutdown was signaled or an error occurred.
+        """
         if not self.mail or notimail_config.shutdown_in_progress or self.stop_event.is_set():
             return False
 
         logging.info(f"[{self.email_user} - {self.folder}] IDLE mode started. Waiting for new email...")
         try:
-            tag = self.mail._new_tag().decode()
+            # Manually send the IDLE command since imaplib has no built-in IDLE support
+            tag: str = self.mail._new_tag().decode()
             self.mail.send(f'{tag} IDLE\r\n'.encode('utf-8'))
 
-            end_time = time.time() + IDLE_TIMEOUT
+            end_time: float = time.time() + IDLE_TIMEOUT
 
             while time.time() < end_time:
-                timeout = min(30, end_time - time.time())
+                # Poll in 30-second chunks so we can check for shutdown frequently
+                timeout: float = min(30, end_time - time.time())
                 if timeout <= 0:
                     break
 
+                # Multiplex: wait for data on IMAP socket OR the shutdown signal socket
                 rlist, _, _ = select.select([self.mail.sock, shutdown_sock_r], [], [], timeout)
 
                 if self.stop_event.is_set():
@@ -193,6 +322,7 @@ class IMAPHandler:
                     return False
 
                 if shutdown_sock_r in rlist:
+                    # Drain the shutdown signal byte(s)
                     shutdown_sock_r.recv(1024)
                     logging.info(f"[{self.email_user} - {self.folder}] Shutdown signal received during IDLE")
                     self.mail.send(b'DONE\r\n')
@@ -200,16 +330,18 @@ class IMAPHandler:
                     return False
 
                 if self.mail.sock in rlist:
-                    line = self.mail.readline().decode('utf-8', errors='ignore')
+                    line: str = self.mail.readline().decode('utf-8', errors='ignore')
                     if not line:
                         raise ConnectionAbortedError("Connection closed by server")
 
                     logging.debug(f"[{self.email_user} - {self.folder}] IDLE response: {line.strip()}")
 
+                    # Server-side errors during IDLE indicate a broken connection
                     if 'BYE' in line or 'NO ' in line or 'BAD ' in line:
                         logging.warning(f"[{self.email_user} - {self.folder}] Received error from server: {line.strip()}")
                         raise ConnectionAbortedError(f"Server sent: {line.strip()}")
 
+                    # EXISTS response means new mail has arrived
                     if 'EXISTS' in line:
                         logging.info(f"[{self.email_user} - {self.folder}] New email detected: {line.strip()}")
                         self.mail.send(b'DONE\r\n')
@@ -217,6 +349,8 @@ class IMAPHandler:
                         self.last_check = datetime.datetime.now()
                         return True
 
+            # IDLE timeout reached without new mail — still return True
+            # so the caller can verify the connection and re-enter IDLE
             logging.info(f"[{self.email_user} - {self.folder}] IDLE timeout reached")
             self.metrics.get('IDLE_TIMEOUTS', _DummyMetric()).inc()
             self.mail.send(b'DONE\r\n')
@@ -233,12 +367,25 @@ class IMAPHandler:
         finally:
             logging.info(f"[{self.email_user} - {self.folder}] IDLE mode ended")
 
-    def process_emails(self, db_path):
+    def process_emails(self, db_path: str) -> bool:
+        """Process unseen emails on this connection.
+
+        Creates an EmailProcessor and delegates to it. If processing
+        fails, marks the handler as unhealthy so the monitor loop
+        will reconnect.
+
+        Args:
+            db_path: Filesystem path to the SQLite database.
+
+        Returns:
+            True if processing succeeded, False on error.
+        """
         if not self.mail or not self.healthy:
             return False
 
         try:
-            processor = EmailProcessor(self.mail, self.email_user, self.notifier, db_path, self.metrics)
+            processor = EmailProcessor(
+                self.mail, self.email_user, self.notifier, db_path, self.metrics)
             processor.process()
             return True
         except Exception as e:
@@ -250,22 +397,42 @@ class IMAPHandler:
 
 
 class MultiIMAPHandler:
-    """Orchestrates monitoring of multiple IMAP accounts concurrently."""
-    def __init__(self, accounts, metrics=None, db_path=None):
+    """Orchestrates monitoring of multiple IMAP accounts concurrently.
+
+    Creates one IMAPHandler per account/folder pair and runs each in
+    its own daemon thread. The run() method blocks until all threads
+    complete (which normally only happens on shutdown).
+
+    Attributes:
+        accounts: List of account configuration dicts.
+        metrics: Shared Prometheus metrics dict.
+        db_path: Filesystem path to the SQLite database.
+        handlers: List of IMAPHandler instances (one per account).
+        lock: Threading lock used to serialize email processing.
+        threads: List of monitoring threads (one per handler).
+    """
+
+    def __init__(
+        self,
+        accounts: List[Dict[str, Any]],
+        metrics: Optional[Dict[str, Any]] = None,
+        db_path: Optional[str] = None,
+    ) -> None:
         self.accounts = accounts
-        self.metrics = metrics or {}
-        self.db_path = db_path or "processed_emails.db"
-        self.handlers = [
+        self.metrics: Dict[str, Any] = metrics or {}
+        self.db_path: str = db_path or "processed_emails.db"
+        self.handlers: List[IMAPHandler] = [
             IMAPHandler(
                 account['Host'], account['EmailUser'], account['EmailPass'],
                 account['Folder'], account['Notifier'], metrics=self.metrics
             )
             for account in accounts
         ]
-        self.lock = Lock()
-        self.threads = []
+        self.lock: Lock = Lock()
+        self.threads: List[threading.Thread] = []
 
-    def run(self):
+    def run(self) -> None:
+        """Start a monitoring thread for each handler and block until all finish."""
         self.threads = []
         for handler in self.handlers:
             thread = threading.Thread(
@@ -277,33 +444,48 @@ class MultiIMAPHandler:
         for thread in self.threads:
             thread.join()
 
-    def monitor_account(self, handler):
+    def monitor_account(self, handler: IMAPHandler) -> None:
+        """Main loop for monitoring a single IMAP account.
+
+        Repeatedly connects, enters IDLE, processes new emails, and
+        handles errors with exponential backoff. Runs until the global
+        shutdown flag is set or the handler's stop_event is triggered.
+
+        Args:
+            handler: The IMAPHandler instance to monitor.
+        """
         logging.info(f"Monitoring {handler.email_user} - Folder: {handler.folder}")
-        backoff_time = RETRY_DELAY
+        backoff_time: int = RETRY_DELAY
 
         while not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
             try:
                 if not handler.connect(all_handlers=self.handlers):
-                    retry_time = min(backoff_time * (handler.retry_count % 5), 300)
+                    # Exponential backoff capped at 300 seconds (5 minutes)
+                    retry_time: int = min(backoff_time * (handler.retry_count % 5), 300)
                     logging.info(f"[{handler.email_user} - {handler.folder}] Retrying connection in {retry_time} seconds")
 
-                    wait_until = time.time() + retry_time
+                    # Sleep in 1-second increments to respond quickly to shutdown
+                    wait_until: float = time.time() + retry_time
                     while time.time() < wait_until and not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
                         time.sleep(1)
 
                     continue
 
+                # Reset backoff on successful connection
                 backoff_time = RETRY_DELAY
 
+                # Inner loop: IDLE -> process -> verify -> repeat
                 while handler.healthy and not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
-                    idle_result = handler.idle()
+                    idle_result: bool = handler.idle()
                     if not idle_result:
                         break
 
+                    # Serialize email processing across all handler threads
                     with self.lock:
                         if not handler.process_emails(self.db_path):
                             break
 
+                    # Verify the connection is still alive after processing
                     try:
                         status, _ = handler.mail.noop()
                         if status != 'OK':
@@ -324,6 +506,7 @@ class MultiIMAPHandler:
                 handler.healthy = False
                 self.metrics.get('ERRORS', _DummyMetric()).inc()
 
+            # Clean up the dead connection before retrying
             if handler.mail:
                 try:
                     handler.mail.close()
@@ -334,12 +517,25 @@ class MultiIMAPHandler:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     sum(1 for h in self.handlers if h.mail is not None))
 
+            # Brief pause before reconnection attempt
             if not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
                 time.sleep(5)
 
 
-def connection_watchdog(multi_handler):
-    """Monitor all handler threads and restart any that have died."""
+def connection_watchdog(multi_handler: MultiIMAPHandler) -> None:
+    """Monitor all handler threads and restart any that have died.
+
+    Runs in its own thread, checking every 60 seconds whether each
+    monitoring thread is still alive. If a thread has died (e.g. due
+    to an unhandled exception), it resets the handler state and spawns
+    a replacement thread.
+
+    A notification is sent when a thread is restarted so the user
+    is aware of the recovery.
+
+    Args:
+        multi_handler: The MultiIMAPHandler whose threads to watch.
+    """
     while not notimail_config.shutdown_in_progress:
         time.sleep(60)
 
@@ -348,9 +544,10 @@ def connection_watchdog(multi_handler):
 
         for i, thread in enumerate(multi_handler.threads):
             if not thread.is_alive() and not notimail_config.shutdown_in_progress:
-                handler = multi_handler.handlers[i]
+                handler: IMAPHandler = multi_handler.handlers[i]
                 logging.warning(f"Thread for {handler.email_user} - {handler.folder} has died. Restarting...")
 
+                # Clean up any lingering IMAP connection
                 if handler.mail:
                     try:
                         handler.mail.close()
@@ -359,6 +556,7 @@ def connection_watchdog(multi_handler):
                         pass
                     handler.mail = None
 
+                # Reset handler state so it can reconnect cleanly
                 handler.healthy = True
                 handler.stop_event.clear()
 
@@ -370,6 +568,7 @@ def connection_watchdog(multi_handler):
                 multi_handler.threads[i] = new_thread
                 new_thread.start()
 
+                # Notify the user that a thread was automatically restarted
                 if handler.notifier:
                     try:
                         handler.notifier.send_notification(
@@ -380,13 +579,30 @@ def connection_watchdog(multi_handler):
 
 
 class _DummyMetric:
-    """Fallback metric that does nothing, used when metrics dict is incomplete."""
-    def inc(self, amount=1):
+    """Fallback metric that does nothing, used when metrics dict is incomplete.
+
+    This is a module-internal version used by IMAPHandler when a metric
+    key is missing from the dict. The public equivalent lives in
+    notimail.config.DummyMetric.
+    """
+
+    def inc(self, amount: int = 1) -> None:
+        """No-op increment."""
         pass
-    def set(self, value):
+
+    def set(self, value: float) -> None:
+        """No-op set."""
         pass
-    def time(self):
+
+    def time(self) -> "_Timer":
+        """Return a no-op context manager.
+
+        Returns:
+            A context manager that does nothing on enter/exit.
+        """
         class _Timer:
-            def __enter__(self): pass
-            def __exit__(self, *a): pass
+            def __enter__(self) -> None:
+                pass
+            def __exit__(self, *a: Any) -> None:
+                pass
         return _Timer()
