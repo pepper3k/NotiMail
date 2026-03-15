@@ -15,7 +15,6 @@ import imaplib
 import email
 import time
 import socket
-import sqlite3
 import datetime
 import signal
 import sys
@@ -43,6 +42,9 @@ if flask_available:
 args = parse_args()
 config = load_config(args.config)
 validate_config(config)
+
+# Database location from config
+db_path = config.get('GENERAL', 'DataBaseLocation', fallback="processed_emails.db")
 
 # Setup logging and Prometheus metrics
 log_file_location = setup_logging(config)
@@ -148,57 +150,7 @@ else:
         logging.info("FlaskHost or FlaskPort not specified. Web interface will not be started.")
     app = None
 
-class DatabaseHandler:
-    def __init__(self, db_name=None):
-        if db_name is None:
-            db_name = config.get('GENERAL', 'DataBaseLocation', fallback="processed_emails.db")
-        self.connection = sqlite3.connect(db_name)
-        self.cursor = self.connection.cursor()
-        self.create_table()
-        self.update_schema_if_needed()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
-
-    def create_table(self):
-        self.cursor.execute('''
-        CREATE TABLE IF NOT EXISTS processed_emails (
-            email_account TEXT,
-            uid TEXT,
-            notified INTEGER,
-            processed_date TEXT,
-            PRIMARY KEY(email_account, uid)
-        )''')
-        self.connection.commit()
-
-    def update_schema_if_needed(self):
-        self.cursor.execute("PRAGMA table_info(processed_emails)")
-        columns = [column[1] for column in self.cursor.fetchall()]
-        if 'email_account' not in columns:
-            self.cursor.execute("ALTER TABLE processed_emails ADD COLUMN email_account TEXT DEFAULT 'unknown'")
-            self.cursor.execute("CREATE UNIQUE INDEX idx_email_account_uid ON processed_emails(email_account, uid)")
-            self.connection.commit()
-
-    def add_email(self, email_account, uid, notified):
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute("INSERT OR REPLACE INTO processed_emails (email_account, uid, notified, processed_date) VALUES (?, ?, ?, ?)",
-                            (email_account, uid, notified, date_str))
-        self.connection.commit()
-
-    def is_email_notified(self, email_account, uid):
-        self.cursor.execute("SELECT * FROM processed_emails WHERE email_account = ? AND uid = ? AND notified = 1", (email_account, uid))
-        return bool(self.cursor.fetchone())
-
-    def delete_old_emails(self, days=7):
-        date_limit_str = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute("DELETE FROM processed_emails WHERE processed_date < ?", (date_limit_str,))
-        self.connection.commit()
-
-    def close(self):
-        self.connection.close()
+from notimail.database import DatabaseHandler
 
 class EmailProcessor:
     def __init__(self, mail, email_account, notifier):
@@ -223,7 +175,7 @@ class EmailProcessor:
     def process(self):
         logging.info("Fetching the latest email...")
         try:
-            with DatabaseHandler() as db_handler:
+            with DatabaseHandler(db_path) as db_handler:
                 for message in self.fetch_unseen_emails():
                     uid = message.decode('utf-8')
                     if db_handler.is_email_notified(self.email_account, uid):
@@ -731,7 +683,7 @@ def initial_checks():
     
     # Test database operations
     try:
-        with DatabaseHandler() as db:
+        with DatabaseHandler(db_path) as db:
             db.add_email("test", "test", 0)
             db.cursor.execute("DELETE FROM processed_emails WHERE email_account=? AND uid=?", ("test", "test"))
             db.connection.commit()
