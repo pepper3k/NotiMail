@@ -1,89 +1,76 @@
+# NotiMail v3 Configuration
+#
+# This file configures general settings only. Email accounts and
+# notification providers are managed via the web dashboard or REST API
+# and stored encrypted in the database.
+#
+# On first upgrade from v2.x, existing EMAIL/NTFY/PUSHOVER/GOTIFY/APPRISE
+# sections are automatically migrated to the database. You can remove
+# them from this file after migration.
+
 [GENERAL]
+# --- Logging ---
 LogFileLocation = /var/log/notimail/notimail.log
-DataBaseLocation = /var/cache/notimail/processed_emails.db
-#LogRotationType can be "size" or "time"
+# LogRotationType can be "size" or "time"
 LogRotationType = size
-#LogRotationSize - Only if size is selected - default is 10 MB
+# LogRotationSize - Only if size is selected - default is 10 MB
 LogRotationSize = 10485760
-#LogRotationInterval - Only if time is selected - in days
+# LogRotationInterval - Only if time is selected - in days
 LogRotationInterval = 7
 LogBackupCount = 5
 
-# API Key used to access private information
-#APIKey = YouApiKeyHERE!
+# --- Database ---
+DataBaseLocation = /var/cache/notimail/notimail.db
 
-# Prometheus configuration won't be enabled if not specified or if the required libraries are not present.
+# --- Encryption ---
+# Path to the Fernet encryption key file (auto-generated on first run)
+SecretKeyLocation = /etc/notimail/secret.key
+
+# --- Web Interface (required for user management) ---
+FlaskHost = 0.0.0.0
+FlaskPort = 8080
+# FlaskSecretKey is auto-derived from the encryption key.
+# Override here only if you need a specific value:
+#FlaskSecretKey = your-custom-secret
+
+# --- Session ---
+SessionLifetimeHours = 24
+
+# --- Invite Settings ---
+InviteExpiryDays = 7
+
+# --- Brute-Force Protection ---
+RateLimitMaxAttempts = 5
+RateLimitWindowMinutes = 15
+RateLimitLockoutMinutes = 30
+
+# --- Reverse Proxy ---
+# Set to the number of trusted proxies (e.g. 1 for nginx in front)
+# so that request.remote_addr reflects the real client IP.
+# WARNING: Only set this if you are behind a trusted reverse proxy.
+#TrustedProxies = 1
+
+# --- Prometheus (optional) ---
+# Metrics server won't start if not specified or if prometheus_client is not installed.
 #PrometheusHost = 0.0.0.0
 #PrometheusPort = 8000
 
-# API Flask Interface won't be enabled if not specified or if the required libraries are not present.
-#FlaskHost = 0.0.0.0
-#FlaskPort = 8080
+# =====================================================================
+# LEGACY: The sections below are only needed for migration from v2.x.
+# After migration, email accounts are managed via the web dashboard
+# or REST API and these sections can be removed.
+# =====================================================================
 
-[EMAIL:account1]
-EmailUser = your@address.com
-EmailPass = YourPassword
-Host = mail.example.com
+#[EMAIL:account1]
+#EmailUser = your@address.com
+#EmailPass = YourPassword
+#Host = mail.example.com
 #Folders = inbox, sent
-
-# Uncomment and configure the following sections for account-specific notification providers
 
 #[NTFY:account1]
 #Url1 = https://ntfy.sh/TOPIC1
-#Token1 = Optional token to send notifications to protected topics
-#Url2 = https://ntfy.sh/TOPIC2
-#Token2 = Optional token to send notifications to protected topics
-
-#[PUSHOVER:account1]
-#ApiToken = YOUR_PUSHOVER_API_TOKEN
-#UserKey = YOUR_PUSHOVER_USER_KEY
-
-#[GOTIFY:account1]
-#Url = https://gotify.example.com/message
-#Token = your_gotify_token
-
-#[APPRISE:account1]
-#urls = pover://user@token, discord://webhook_id/webhook_token
-
-#[EMAIL:account2]
-#EmailUser = your@address.com
-#EmailPass = YourPassword
-#Host = mail.server.com
-#Folders = inbox, sent
-
-# Uncomment and configure the following sections for account-specific notification providers
-
-#[NTFY:account2]
-#Url1 = https://ntfy.sh/TOPIC3
 #Token1 = Optional token
-#Url2 = https://ntfy.sh/TOPIC4
-#Token2 = Optional token
 
-#[PUSHOVER:account2]
-#ApiToken = YOUR_PUSHOVER_API_TOKEN
-#UserKey = YOUR_PUSHOVER_USER_KEY
-
-#[GOTIFY:account2]
-#Url = https://gotify.example.com/message
-#Token = your_gotify_token
-
-#[APPRISE:account2]
-#urls = pover://user@token, discord://webhook_id/webhook_token
-
-# Global notification providers
-# If no account-specific notification providers are defined, these will be used - please, set at least one notification provider
-
-[NTFY]
-Url1 = https://ntfy.example.com/global_topic
-Token1 = Optional global token
-
-#[PUSHOVER]
-#ApiToken = YOUR_GLOBAL_PUSHOVER_API_TOKEN
-#UserKey = YOUR_GLOBAL_PUSHOVER_USER_KEY
-
-#[GOTIFY]
-#Url = https://gotify.example.com/message
-#Token = your_global_gotify_token
-
-#[APPRISE]
-#urls = pover://user@token, discord://webhook_id/webhook_token
+#[NTFY]
+#Url1 = https://ntfy.example.com/global_topic
+#Token1 = Optional global token
