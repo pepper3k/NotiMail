@@ -211,6 +211,189 @@ def register(code: str):
     return redirect(url_for('web.login'))
 
 
+@web_bp.route('/accounts', methods=['GET'])
+@login_required
+def accounts_page():
+    """Account management page."""
+    db: DatabaseHandler = g.db
+    crypto: CryptoManager = g.crypto
+    raw_accounts = db.get_email_accounts_for_user(session['user_id'])
+    accounts = []
+    for acct in raw_accounts:
+        try:
+            accounts.append({
+                'id': acct['id'],
+                'account_name': acct['account_name'],
+                'email_user': crypto.decrypt(acct['email_user_encrypted']),
+                'host': crypto.decrypt(acct['host_encrypted']),
+                'folders': acct['folders'],
+                'enabled': acct['enabled'],
+            })
+        except Exception:
+            accounts.append({'id': acct['id'], 'account_name': acct['account_name'],
+                           'email_user': '(decrypt error)', 'host': '', 'folders': '', 'enabled': 0})
+
+    host_status = g.host_limits.get_host_status() if g.host_limits else {}
+    return render_template('accounts.html', accounts=accounts, host_status=host_status)
+
+
+@web_bp.route('/accounts/add', methods=['POST'])
+@login_required
+def add_account():
+    """Add an email account from the web form."""
+    import json as _json
+    db: DatabaseHandler = g.db
+    crypto: CryptoManager = g.crypto
+
+    account_name = request.form.get('account_name', '').strip()
+    email_user = request.form.get('email_user', '').strip()
+    email_pass = request.form.get('email_pass', '')
+    host = request.form.get('host', '').strip()
+    folders = request.form.get('folders', 'inbox').strip()
+    ntfy_url = request.form.get('ntfy_url', '').strip()
+
+    if not all([account_name, email_user, email_pass, host]):
+        flash('All fields except notification URL are required.', 'error')
+        return redirect(url_for('web.accounts_page'))
+
+    account_id = db.add_email_account(
+        user_id=session['user_id'],
+        account_name=account_name,
+        email_user_encrypted=crypto.encrypt(email_user),
+        email_pass_encrypted=crypto.encrypt(email_pass),
+        host_encrypted=crypto.encrypt(host),
+        folders=folders,
+    )
+
+    if ntfy_url:
+        config_json = _json.dumps({"urls": [{"url": ntfy_url, "token": None}]})
+        db.add_notification_config(account_id, "ntfy", crypto.encrypt(config_json))
+
+    flash(f'Account "{account_name}" added. It will be picked up within 60 seconds.', 'success')
+    return redirect(url_for('web.accounts_page'))
+
+
+@web_bp.route('/accounts/<int:account_id>/delete', methods=['POST'])
+@login_required
+def delete_account_web(account_id: int):
+    """Delete an email account from the web UI."""
+    db: DatabaseHandler = g.db
+    acct = db.get_email_account_by_id(account_id)
+    if not acct or acct['user_id'] != session['user_id']:
+        flash('Account not found.', 'error')
+        return redirect(url_for('web.accounts_page'))
+    db.delete_email_account(account_id)
+    flash('Account deleted.', 'success')
+    return redirect(url_for('web.accounts_page'))
+
+
+@web_bp.route('/keys', methods=['GET'])
+@login_required
+def keys_page():
+    """API key management page."""
+    db: DatabaseHandler = g.db
+    keys = db.get_api_keys_for_user(session['user_id'])
+    return render_template('api_keys.html', keys=keys, new_key=session.pop('new_api_key', None))
+
+
+@web_bp.route('/keys/create', methods=['POST'])
+@login_required
+def create_key_web():
+    """Generate a new API key from the web UI."""
+    db: DatabaseHandler = g.db
+    label = request.form.get('label', '').strip()
+    raw_key, key_hash, key_prefix = generate_api_key()
+    db.add_api_key(session['user_id'], key_hash, key_prefix, label)
+    session['new_api_key'] = raw_key  # Flash it on the next page load
+    return redirect(url_for('web.keys_page'))
+
+
+@web_bp.route('/keys/<int:key_id>/revoke', methods=['POST'])
+@login_required
+def revoke_key_web(key_id: int):
+    """Revoke an API key from the web UI."""
+    db: DatabaseHandler = g.db
+    if db.revoke_api_key(key_id, session['user_id']):
+        flash('Key revoked.', 'success')
+    else:
+        flash('Key not found.', 'error')
+    return redirect(url_for('web.keys_page'))
+
+
+@web_bp.route('/invites', methods=['GET'])
+@login_required
+def invites_page():
+    """Invite management page."""
+    db: DatabaseHandler = g.db
+    invites = db.get_invites_for_user(session['user_id'])
+    return render_template('invites.html', invites=invites, new_code=session.pop('new_invite_code', None))
+
+
+@web_bp.route('/invites/create', methods=['POST'])
+@login_required
+def create_invite_web():
+    """Generate an invite code from the web UI."""
+    db: DatabaseHandler = g.db
+    code = create_invite(db, session['user_id'])
+    session['new_invite_code'] = code
+    return redirect(url_for('web.invites_page'))
+
+
+@web_bp.route('/admin')
+@admin_required
+def admin_page():
+    """Admin panel: user management and global status."""
+    db: DatabaseHandler = g.db
+    crypto: CryptoManager = g.crypto
+
+    raw_users = db.get_all_users()
+    users = []
+    for u in raw_users:
+        try:
+            username = crypto.decrypt(u['username'])
+        except Exception:
+            username = '(decrypt error)'
+        users.append({
+            'id': u['id'], 'username': username, 'role': u['role'],
+            'created_at': u['created_at'], 'last_login': u['last_login'],
+        })
+
+    all_status = []
+    multi_handler = g.get('multi_handler')
+    if multi_handler:
+        for handler in multi_handler.handlers:
+            all_status.append({
+                'email_user': handler.email_user,
+                'folder': handler.folder,
+                'connected': handler.mail is not None,
+                'last_check': handler.last_check.strftime("%Y-%m-%d %H:%M:%S") if handler.last_check else None,
+                'last_error': handler.last_error,
+            })
+
+    return render_template('admin.html', users=users, all_status=all_status,
+                         current_user_id=session['user_id'])
+
+
+@web_bp.route('/admin/users/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def reset_password_web(user_id: int):
+    """Reset a user's password (admin only)."""
+    db: DatabaseHandler = g.db
+    new_password = request.form.get('new_password', '')
+    if len(new_password) < 8:
+        flash('Password must be at least 8 characters.', 'error')
+        return redirect(url_for('web.admin_page'))
+
+    user = db.get_user_by_id(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('web.admin_page'))
+
+    db.update_user_password(user_id, hash_password(new_password))
+    flash(f'Password reset for user ID {user_id}.', 'success')
+    return redirect(url_for('web.admin_page'))
+
+
 # ---------------------------------------------------------------------------
 # Blueprint: API routes (JSON)
 # ---------------------------------------------------------------------------

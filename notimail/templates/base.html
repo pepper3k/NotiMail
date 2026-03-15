@@ -39,6 +39,12 @@
         <span class="brand">NotiMail</span>
         <div>
             <a href="{{ url_for('web.dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('web.accounts_page') }}">Accounts</a>
+            <a href="{{ url_for('web.keys_page') }}">API Keys</a>
+            <a href="{{ url_for('web.invites_page') }}">Invites</a>
+            {% if session.get('role') == 'admin' %}
+            <a href="{{ url_for('web.admin_page') }}">Admin</a>
+            {% endif %}
             <a href="{{ url_for('web.logout') }}">Logout ({{ session.get('username', '') }})</a>
         </div>
     </nav>

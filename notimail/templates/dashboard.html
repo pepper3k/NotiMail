@@ -4,25 +4,24 @@
 <h1 style="margin: 20px 0;">Dashboard</h1>
 <p style="margin-bottom: 20px;">Welcome, <strong>{{ username }}</strong>.</p>
 
-<div class="card">
-    <h3>Quick Actions</h3>
-    <p style="margin-top: 12px;">
-        Use the <strong>REST API</strong> to manage email accounts and notification configs.
-        See the <a href="https://github.com/niccoloseveri/NotiMail">documentation</a> for API usage.
-    </p>
-</div>
-
-<div class="card">
-    <h3>API Endpoints</h3>
-    <table>
-        <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
-        <tr><td>GET/POST</td><td>/api/accounts</td><td>List or create email accounts</td></tr>
-        <tr><td>GET/PUT/DELETE</td><td>/api/accounts/&lt;id&gt;</td><td>Manage a specific account</td></tr>
-        <tr><td>GET/POST</td><td>/api/accounts/&lt;id&gt;/notifications</td><td>Notification configs</td></tr>
-        <tr><td>POST/GET</td><td>/api/keys</td><td>Generate or list API keys</td></tr>
-        <tr><td>DELETE</td><td>/api/keys/&lt;id&gt;</td><td>Revoke an API key</td></tr>
-        <tr><td>POST/GET</td><td>/api/invites</td><td>Generate or list invite codes</td></tr>
-        <tr><td>GET</td><td>/api/status</td><td>Connection status</td></tr>
-    </table>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
+    <a href="{{ url_for('web.accounts_page') }}" class="card" style="text-decoration: none; color: inherit;">
+        <h3>Accounts</h3>
+        <p>Manage email accounts and notification configs.</p>
+    </a>
+    <a href="{{ url_for('web.keys_page') }}" class="card" style="text-decoration: none; color: inherit;">
+        <h3>API Keys</h3>
+        <p>Generate and manage API keys for REST access.</p>
+    </a>
+    <a href="{{ url_for('web.invites_page') }}" class="card" style="text-decoration: none; color: inherit;">
+        <h3>Invites</h3>
+        <p>Create invite codes for new users.</p>
+    </a>
+    {% if session.get('role') == 'admin' %}
+    <a href="{{ url_for('web.admin_page') }}" class="card" style="text-decoration: none; color: inherit;">
+        <h3>Admin</h3>
+        <p>Manage users and view all connection status.</p>
+    </a>
+    {% endif %}
 </div>
 {% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Invites - NotiMail{% endblock %}
+{% block content %}
+<h1 style="margin: 20px 0;">Invite Codes</h1>
+
+<div class="card">
+    <h3>Generate Invite</h3>
+    <form method="POST" action="{{ url_for('web.create_invite_web') }}" style="margin-top: 12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+        <button type="submit" class="btn btn-primary">Generate Invite Code</button>
+    </form>
+</div>
+
+{% if new_code %}
+<div class="flash success">
+    <strong>Invite created!</strong> Share this link:<br>
+    <code style="word-break: break-all;">{{ request.host_url }}register/{{ new_code }}</code>
+</div>
+{% endif %}
+
+{% if invites %}
+<div class="card">
+    <h3>Your Invites</h3>
+    <table style="margin-top: 12px;">
+        <tr><th>Code (prefix)</th><th>Created</th><th>Expires</th><th>Status</th></tr>
+        {% for inv in invites %}
+        <tr>
+            <td><code>{{ inv.code[:12] }}...</code></td>
+            <td>{{ inv.created_at }}</td>
+            <td>{{ inv.expires_at or "never" }}</td>
+            <td>
+                {% if inv.redeemed_by %}
+                <span style="color: #27ae60;">Redeemed</span>
+                {% else %}
+                <span style="color: #3498db;">Pending</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+{% endblock %}

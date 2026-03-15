@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Accounts - NotiMail{% endblock %}
+{% block content %}
+<h1 style="margin: 20px 0;">Email Accounts</h1>
+
+<div class="card">
+    <h3>Add Account</h3>
+    <form method="POST" action="{{ url_for('web.add_account') }}" style="margin-top: 12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <div>
+                <label for="account_name">Account Name</label>
+                <input type="text" id="account_name" name="account_name" placeholder="work" required>
+            </div>
+            <div>
+                <label for="email_user">Email Address</label>
+                <input type="email" id="email_user" name="email_user" placeholder="user@example.com" required>
+            </div>
+            <div>
+                <label for="email_pass">Password</label>
+                <input type="password" id="email_pass" name="email_pass" required>
+            </div>
+            <div>
+                <label for="host">IMAP Host</label>
+                <input type="text" id="host" name="host" placeholder="imap.example.com" required>
+            </div>
+            <div>
+                <label for="folders">Folders (comma-separated)</label>
+                <input type="text" id="folders" name="folders" value="inbox">
+            </div>
+            <div>
+                <label for="ntfy_url">Notification URL (ntfy)</label>
+                <input type="text" id="ntfy_url" name="ntfy_url" placeholder="https://ntfy.sh/mytopic?up=1">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary" style="margin-top: 12px;">Add Account</button>
+    </form>
+</div>
+
+{% if accounts %}
+<div class="card">
+    <h3>Your Accounts</h3>
+    <table style="margin-top: 12px;">
+        <tr>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Host</th>
+            <th>Folders</th>
+            <th>Enabled</th>
+            <th>Actions</th>
+        </tr>
+        {% for acct in accounts %}
+        <tr>
+            <td>{{ acct.account_name }}</td>
+            <td>{{ acct.email_user }}</td>
+            <td>{{ acct.host }}</td>
+            <td>{{ acct.folders }}</td>
+            <td>{{ "Yes" if acct.enabled else "No" }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('web.delete_account_web', account_id=acct.id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                    <button type="submit" class="btn btn-danger" onclick="return confirm('Delete this account?');">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if host_status %}
+<div class="card">
+    <h3>Host Connection Status</h3>
+    <table style="margin-top: 12px;">
+        <tr><th>Host</th><th>Active</th><th>Waiting</th><th>Limit</th><th>Status</th></tr>
+        {% for host, info in host_status.items() %}
+        <tr>
+            <td>{{ host }}</td>
+            <td>{{ info.active }}</td>
+            <td>{{ info.waiting }}</td>
+            <td>{{ info.max_concurrent or "unknown" }} ({{ info.limit_type }})</td>
+            <td>
+                {% if info.at_limit %}
+                <span style="color: #e74c3c;">At limit</span>
+                {% else %}
+                <span style="color: #27ae60;">OK</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+{% endblock %}

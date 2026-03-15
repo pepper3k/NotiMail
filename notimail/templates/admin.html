@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Admin - NotiMail{% endblock %}
+{% block content %}
+<h1 style="margin: 20px 0;">Admin Panel</h1>
+
+<div class="card">
+    <h3>Users</h3>
+    <table style="margin-top: 12px;">
+        <tr><th>ID</th><th>Username</th><th>Role</th><th>Created</th><th>Last Login</th><th>Actions</th></tr>
+        {% for user in users %}
+        <tr>
+            <td>{{ user.id }}</td>
+            <td>{{ user.username }}</td>
+            <td>{{ user.role }}</td>
+            <td>{{ user.created_at }}</td>
+            <td>{{ user.last_login or "never" }}</td>
+            <td>
+                {% if user.id != current_user_id %}
+                <form method="POST" action="{{ url_for('web.reset_password_web', user_id=user.id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                    <input type="password" name="new_password" placeholder="New password" required style="width: 150px; margin-bottom: 0;">
+                    <button type="submit" class="btn btn-primary">Reset Password</button>
+                </form>
+                {% else %}
+                <span style="color: #999;">(you)</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+
+{% if all_status %}
+<div class="card">
+    <h3>All Connection Status</h3>
+    <table style="margin-top: 12px;">
+        <tr><th>Account</th><th>Folder</th><th>Connected</th><th>Last Check</th><th>Error</th></tr>
+        {% for s in all_status %}
+        <tr>
+            <td>{{ s.email_user }}</td>
+            <td>{{ s.folder }}</td>
+            <td class="{{ 'status-connected' if s.connected else 'status-disconnected' }}">
+                {{ "Yes" if s.connected else "No" }}
+            </td>
+            <td>{{ s.last_check or "-" }}</td>
+            <td>{{ s.last_error or "-" }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+{% endblock %}
