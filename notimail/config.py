@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
                         help='Test the configuration options to ensure they work properly')
     parser.add_argument('--list-folders', action='store_true',
                         help='List all IMAP folders of the configured mailboxes')
+    parser.add_argument('--setup-admin', action='store_true',
+                        help='Create the initial admin user (interactive)')
+    parser.add_argument('--create-invite', action='store_true',
+                        help='Generate an invite code for a new user')
     return parser.parse_args()
 
 
@@ -91,16 +95,17 @@ def load_config(config_path: str) -> configparser.ConfigParser:
 def validate_config(config: configparser.ConfigParser) -> None:
     """Validate that required configuration sections exist.
 
+    In v3, EMAIL sections are optional (accounts can be in the database).
+    Only [GENERAL] is required.
+
     Args:
         config: The loaded ConfigParser to validate.
 
     Raises:
-        ValueError: If [GENERAL] is missing or no EMAIL section is defined.
+        ValueError: If [GENERAL] is missing.
     """
     if 'GENERAL' not in config.sections():
         raise ValueError("The [GENERAL] section is required in config.ini.")
-    if not any(section.startswith('EMAIL') for section in config.sections()):
-        raise ValueError("At least one EMAIL section is required.")
 
 
 def setup_logging(config: configparser.ConfigParser) -> str:

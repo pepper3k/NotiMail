@@ -363,6 +363,77 @@ def initial_checks():
     
     logging.info("Initial tests completed successfully.")
 
+def setup_admin():
+    """Interactive setup of the initial admin user."""
+    import getpass
+    from notimail.crypto import CryptoManager
+    from notimail.auth import hash_password
+
+    key_path = config.get('GENERAL', 'SecretKeyLocation', fallback='/etc/notimail/secret.key')
+    crypto = CryptoManager(key_path)
+
+    db = DatabaseHandler(db_path)
+    db.apply_migrations()
+
+    if db.count_users() > 0:
+        print("Admin user already exists. Use the web dashboard to manage users.")
+        sys.exit(0)
+
+    print("=== NotiMail Admin Setup ===")
+    username = input("Admin username: ").strip()
+    if not username:
+        print("Error: username cannot be empty.")
+        sys.exit(1)
+
+    password = getpass.getpass("Admin password: ")
+    password_confirm = getpass.getpass("Confirm password: ")
+    if password != password_confirm:
+        print("Error: passwords do not match.")
+        sys.exit(1)
+    if len(password) < 8:
+        print("Error: password must be at least 8 characters.")
+        sys.exit(1)
+
+    user_id = db.add_user(
+        username_encrypted=crypto.encrypt(username),
+        username_lookup=crypto.hmac_hash(username),
+        password_hash=hash_password(password),
+        role="admin",
+    )
+    print(f"Admin user '{username}' created successfully (id={user_id}).")
+    db.close()
+
+
+def create_invite_cli():
+    """Generate an invite code from the command line."""
+    from notimail.crypto import CryptoManager
+    from notimail.auth import create_invite
+
+    key_path = config.get('GENERAL', 'SecretKeyLocation', fallback='/etc/notimail/secret.key')
+    crypto = CryptoManager(key_path)
+
+    db = DatabaseHandler(db_path)
+    db.apply_migrations()
+
+    if db.count_users() == 0:
+        print("Error: no admin user exists. Run --setup-admin first.")
+        sys.exit(1)
+
+    # Use the first admin user
+    users = db.get_all_users()
+    admin = next((u for u in users if u['role'] == 'admin'), None)
+    if not admin:
+        print("Error: no admin user found.")
+        sys.exit(1)
+
+    expire_days = config.getint('GENERAL', 'InviteExpiryDays', fallback=7)
+    code = create_invite(db, admin['id'], expire_days)
+    print(f"Invite code: {code}")
+    print(f"Registration URL: http://<your-host>:<port>/register/{code}")
+    print(f"Expires in {expire_days} days.")
+    db.close()
+
+
 if __name__ == "__main__":
     if args.print_config:
         print_config()
@@ -370,6 +441,10 @@ if __name__ == "__main__":
         test_config()
     elif args.list_folders:
         list_imap_folders()
+    elif args.setup_admin:
+        setup_admin()
+    elif args.create_invite:
+        create_invite_cli()
     else:
         initial_checks()
         multi_account_main()
