@@ -9,6 +9,7 @@ import configparser
 import logging
 import time
 from typing import Any, List, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
 
 import requests
 
@@ -44,6 +45,11 @@ class NTFYNotificationProvider(NotificationProvider):
 
     Supports multiple ntfy endpoints, each with an optional bearer token.
     A 2-second delay is inserted between requests to avoid rate limiting.
+
+    UnifiedPush mode: If the URL contains a `up=1` query parameter
+    (e.g. https://ntfy.sh/topic?up=1), the notification is sent as an
+    empty POST body — no email content (from/subject) is transmitted.
+    The client app receives the push as a "sync now" signal.
     """
 
     def __init__(
@@ -61,8 +67,28 @@ class NTFYNotificationProvider(NotificationProvider):
         self.ntfy_data = ntfy_data
         self.errors_metric = errors_metric
 
+    @staticmethod
+    def _is_unified_push(url: str) -> bool:
+        """Check if a ntfy URL is a UnifiedPush endpoint.
+
+        Detects the `up` query parameter using proper URL parsing,
+        not string matching.
+
+        Args:
+            url: The ntfy endpoint URL.
+
+        Returns:
+            True if the URL contains up=1 (UnifiedPush mode).
+        """
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        return params.get('up', [''])[0] == '1'
+
     def send_notification(self, mail_from: str, mail_subject: str) -> None:
         """POST the notification to each configured ntfy endpoint.
+
+        For UnifiedPush endpoints (?up=1), sends an empty body.
+        For regular endpoints, sends from/subject in headers/body.
 
         Args:
             mail_from: The sender address (From header).
@@ -70,24 +96,35 @@ class NTFYNotificationProvider(NotificationProvider):
         """
         mail_subject = mail_subject if mail_subject is not None else "No Subject"
         mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        encoded_from: bytes = mail_from.encode('utf-8')
-        encoded_subject: bytes = mail_subject.encode('utf-8')
 
         for ntfy_url, token in self.ntfy_data:
-            headers: dict = {"Title": encoded_subject}
+            is_up = self._is_unified_push(ntfy_url)
+            headers: dict = {}
+
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+
+            if is_up:
+                # UnifiedPush: empty body, no email content
+                data = b''
+                logging.debug(f"Sending UP signal to {ntfy_url} (no content)")
+            else:
+                # Legacy mode: include from/subject
+                headers["Title"] = mail_subject.encode('utf-8')
+                data = mail_from.encode('utf-8')
+
             try:
                 response: requests.Response = requests.post(
-                    ntfy_url, data=encoded_from, headers=headers)
+                    ntfy_url, data=data, headers=headers)
                 if response.status_code == 200:
-                    logging.info(f"Notification sent successfully to {ntfy_url} via ntfy")
+                    mode = "UP signal" if is_up else "notification"
+                    logging.info(f"Sent {mode} to {ntfy_url} via ntfy")
                 else:
-                    logging.error(f"Failed to send notification to {ntfy_url} via NTFY. Status Code: {response.status_code}")
+                    logging.error(f"Failed to send to {ntfy_url} via NTFY. Status Code: {response.status_code}")
                     if self.errors_metric:
                         self.errors_metric.inc()
             except requests.RequestException as e:
-                logging.error(f"An error occurred while sending notification to {ntfy_url} via NTFY: {str(e)}")
+                logging.error(f"Error sending to {ntfy_url} via NTFY: {str(e)}")
                 if self.errors_metric:
                     self.errors_metric.inc()
             finally:
