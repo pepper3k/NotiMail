@@ -11,20 +11,13 @@ additional features to store processed email UIDs in a SQLite3 database and ensu
 processed repeatedly.
 """
 
-import imaplib
-import email
-import time
-import socket
 import datetime
-import signal
-import sys
 import logging
+import signal
+import socket
+import sys
 import threading
-import os
-import select
-from email import policy
-from email.parser import BytesParser
-from threading import Lock
+import time
 
 import notimail.config as notimail_config
 from notimail.config import (
@@ -151,313 +144,16 @@ else:
     app = None
 
 from notimail.database import DatabaseHandler
-
-class EmailProcessor:
-    def __init__(self, mail, email_account, notifier):
-        self.mail = mail
-        self.email_account = email_account
-        self.notifier = notifier
-
-    def fetch_unseen_emails(self):
-        try:
-            status, messages = self.mail.uid('search', None, "UNSEEN")
-            if status != 'OK':
-                logging.warning(f"Search for UNSEEN emails returned status: {status}")
-                return []
-            return messages[0].split()
-        except Exception as e:
-            logging.error(f"Error fetching unseen emails: {str(e)}")
-            return []
-
-    def parse_email(self, raw_email):
-        return BytesParser(policy=policy.default).parsebytes(raw_email)
-
-    def process(self):
-        logging.info("Fetching the latest email...")
-        try:
-            with DatabaseHandler(db_path) as db_handler:
-                for message in self.fetch_unseen_emails():
-                    uid = message.decode('utf-8')
-                    if db_handler.is_email_notified(self.email_account, uid):
-                        logging.info(f"Email UID {uid} already processed and notified, skipping...")
-                        continue
-
-                    try:
-                        _, msg = self.mail.uid('fetch', message, '(BODY.PEEK[])')
-                        if not msg or msg[0] is None:
-                            logging.warning(f"Failed to fetch email with UID {uid}")
-                            continue
-                        
-                        for response_part in msg:
-                            if isinstance(response_part, tuple):
-                                with PROCESSING_TIME.time():
-                                    try:
-                                        email_message = self.parse_email(response_part[1])
-                                        sender = email_message.get('From')
-                                        subject = email_message.get('Subject')
-                                        logging.info(f"Processing Email - UID: {uid}, Sender: {sender}, Subject: {subject}")
-                                        
-                                        try:
-                                            self.notifier.send_notification(sender, subject)
-                                            NOTIFICATIONS_SENT.inc()
-                                        except Exception as e:
-                                            logging.error(f"Failed to send notification: {str(e)}")
-                                            ERRORS.inc()
-                                        
-                                        db_handler.add_email(self.email_account, uid, 1)
-                                        EMAILS_PROCESSED.inc()
-                                    except Exception as inner_e:
-                                        logging.error(f"Error processing email content: {str(inner_e)}")
-                                        ERRORS.inc()
-                    except Exception as e:
-                        logging.error(f"Error fetching email with UID {uid}: {str(e)}")
-                        ERRORS.inc()
-
-                db_handler.delete_old_emails()
-        except Exception as e:
-            logging.error(f"Error in process method: {str(e)}")
-            ERRORS.inc()
-            raise  # Re-raise to trigger reconnection
-
 from notimail.notifications import (
-    NotificationProvider, NTFYNotificationProvider, PushoverNotificationProvider,
-    GotifyNotificationProvider, Notifier, parse_notification_providers,
+    Notifier, parse_notification_providers,
 )
-if apprise_available:
-    from notimail.notifications import AppriseNotificationProvider
-
-class IMAPHandler:
-    def __init__(self, host, email_user, email_pass, folder="inbox", notifier=None):
-        self.host = host
-        self.email_user = email_user
-        self.email_pass = email_pass
-        self.folder = folder
-        self.notifier = notifier
-        self.mail = None
-        self.last_check = None
-        self.last_error = None
-        self.retry_count = 0
-        self.healthy = True  # Track if this connection is healthy
-
-    def connect(self):
-        if notimail_config.shutdown_in_progress:
-            return False
-            
-        if self.mail is not None:
-            # Try to check if the connection is still alive
-            try:
-                status, _ = self.mail.noop()
-                if status == 'OK':
-                    logging.info(f"[{self.email_user} - {self.folder}] Connection is still alive")
-                    return True
-            except Exception as e:
-                logging.warning(f"[{self.email_user} - {self.folder}] Connection check failed: {str(e)}")
-            
-            # If we get here, the connection is not healthy; try to clean it up
-            try:
-                self.mail.close()
-                self.mail.logout()
-            except:
-                pass
-            self.mail = None
-            CONNECTIONS.set(sum(1 for handler in multi_handler.handlers if handler.mail is not None))
-        
-        # Attempt to establish a new connection
-        try:
-            logging.info(f"[{self.email_user} - {self.folder}] Connecting to IMAP server...")
-            self.mail = imaplib.IMAP4_SSL(self.host, 993)
-            self.mail.login(self.email_user, self.email_pass)
-            self.mail.select(self.folder)
-            logging.info(f"[{self.email_user} - {self.folder}] Successfully connected to IMAP server")
-            self.last_error = None
-            self.retry_count = 0
-            self.healthy = True
-            CONNECTIONS.set(sum(1 for handler in multi_handler.handlers if handler.mail is not None))
-            return True
-        except Exception as e:
-            self.last_error = str(e)
-            self.mail = None
-            self.retry_count += 1
-            RECONNECTS.inc()
-            CONNECTIONS.set(sum(1 for handler in multi_handler.handlers if handler.mail is not None))
-            logging.error(f"[{self.email_user} - {self.folder}] Connection failed (attempt {self.retry_count}): {str(e)}")
-            if self.notifier and self.retry_count == 1:  # Only notify on first failure
-                try:
-                    self.notifier.send_notification("Connection Error", 
-                                                   f"Failed to connect to {self.email_user} - {self.folder}: {str(e)}")
-                except:
-                    pass
-            return False
-
-    def idle(self):
-        if not self.mail or notimail_config.shutdown_in_progress:
-            return False
-            
-        logging.info(f"[{self.email_user} - {self.folder}] IDLE mode started. Waiting for new email...")
-        try:
-            tag = self.mail._new_tag().decode()
-            self.mail.send(f'{tag} IDLE\r\n'.encode('utf-8'))
-            
-            # Set a timeout to periodically check connection health
-            end_time = time.time() + IDLE_TIMEOUT
-            
-            while time.time() < end_time:
-                # Wait with a small timeout to allow periodic checks
-                timeout = min(30, end_time - time.time())
-                if timeout <= 0:
-                    break
-                    
-                # Wait for activity on the IMAP socket or the shutdown socket
-                rlist, _, _ = select.select([self.mail.sock, shutdown_sock_r], [], [], timeout)
-                
-                if shutdown_sock_r in rlist:
-                    # Received "wake-up" data, exit the loop
-                    shutdown_sock_r.recv(1024)
-                    logging.info(f"[{self.email_user} - {self.folder}] Shutdown signal received during IDLE")
-                    self.mail.send(b'DONE\r\n')
-                    self.mail.readline()
-                    return False
-                    
-                if self.mail.sock in rlist:
-                    line = self.mail.readline().decode('utf-8', errors='ignore')
-                    if not line:
-                        raise ConnectionAbortedError("Connection closed by server")
-                        
-                    logging.debug(f"[{self.email_user} - {self.folder}] IDLE response: {line.strip()}")
-                    
-                    if 'BYE' in line or 'NO ' in line or 'BAD ' in line:
-                        logging.warning(f"[{self.email_user} - {self.folder}] Received error from server: {line.strip()}")
-                        raise ConnectionAbortedError(f"Server sent: {line.strip()}")
-                        
-                    if 'EXISTS' in line:
-                        logging.info(f"[{self.email_user} - {self.folder}] New email detected: {line.strip()}")
-                        # Exit IDLE mode to process the email
-                        self.mail.send(b'DONE\r\n')
-                        self.mail.readline()
-                        self.last_check = datetime.datetime.now()
-                        return True
-            
-            # If we reach here, the IDLE timeout expired
-            logging.info(f"[{self.email_user} - {self.folder}] IDLE timeout reached")
-            IDLE_TIMEOUTS.inc()
-            self.mail.send(b'DONE\r\n')
-            self.mail.readline()
-            self.last_check = datetime.datetime.now()
-            return True
-            
-        except Exception as e:
-            logging.error(f"[{self.email_user} - {self.folder}] Error in IDLE: {str(e)}")
-            self.last_error = str(e)
-            ERRORS.inc()
-            # Mark this connection as unhealthy so we'll reconnect
-            self.healthy = False
-            return False
-        finally:
-            logging.info(f"[{self.email_user} - {self.folder}] IDLE mode ended")
-
-    def process_emails(self):
-        if not self.mail or not self.healthy:
-            return False
-            
-        try:
-            processor = EmailProcessor(self.mail, self.email_user, self.notifier)
-            processor.process()
-            return True
-        except Exception as e:
-            logging.error(f"[{self.email_user} - {self.folder}] Error processing emails: {str(e)}")
-            self.last_error = str(e)
-            ERRORS.inc()
-            self.healthy = False
-            return False
-
-class MultiIMAPHandler:
-    def __init__(self, accounts):
-        self.accounts = accounts
-        self.handlers = [IMAPHandler(account['Host'], account['EmailUser'], account['EmailPass'], account['Folder'], account['Notifier']) for account in accounts]
-        self.lock = Lock()
-        self.threads = []
-
-    def run(self):
-        self.threads = []
-        for handler in self.handlers:
-            thread = threading.Thread(target=self.monitor_account, args=(handler,), name=f"{handler.email_user}-{handler.folder}")
-            thread.daemon = True
-            self.threads.append(thread)
-            thread.start()
-        for thread in self.threads:
-            thread.join()
-
-    def monitor_account(self, handler):
-        logging.info(f"Monitoring {handler.email_user} - Folder: {handler.folder}")
-        backoff_time = RETRY_DELAY
-        
-        while not notimail_config.shutdown_in_progress:
-            try:
-                # Attempt to connect
-                if not handler.connect():
-                    # If connection failed, implement backoff retry
-                    retry_time = min(backoff_time * (handler.retry_count % 5), 300)  # Cap at 5 minutes
-                    logging.info(f"[{handler.email_user} - {handler.folder}] Retrying connection in {retry_time} seconds")
-                    
-                    # Check for shutdown while waiting
-                    wait_until = time.time() + retry_time
-                    while time.time() < wait_until and not notimail_config.shutdown_in_progress:
-                        time.sleep(1)
-                        
-                    continue  # Skip to next iteration to try connecting again
-                
-                # Reset backoff time on successful connection
-                backoff_time = RETRY_DELAY
-                
-                # Monitor mailbox until an error occurs
-                while handler.healthy and not notimail_config.shutdown_in_progress:
-                    idle_result = handler.idle()
-                    if not idle_result:
-                        break  # IDLE failed, so we need to reconnect
-                        
-                    # Process any new emails after IDLE returns
-                    with self.lock:
-                        if not handler.process_emails():
-                            break  # Processing failed, so we need to reconnect
-                            
-                    # Quick check if the connection is still alive
-                    try:
-                        status, _ = handler.mail.noop()
-                        if status != 'OK':
-                            logging.warning(f"[{handler.email_user} - {handler.folder}] NOOP check failed after processing")
-                            break
-                    except Exception as e:
-                        logging.warning(f"[{handler.email_user} - {handler.folder}] NOOP check error: {str(e)}")
-                        break
-                
-            except ConnectionAbortedError as e:
-                logging.error(f"[{handler.email_user} - {handler.folder}] Connection aborted: {str(e)}")
-                handler.last_error = str(e)
-                handler.healthy = False
-                ERRORS.inc()
-            except Exception as e:
-                logging.error(f"[{handler.email_user} - {handler.folder}] Unexpected error: {str(e)}")
-                handler.last_error = str(e)
-                handler.healthy = False
-                ERRORS.inc()
-            
-            # Clean up connection before retrying
-            if handler.mail:
-                try:
-                    handler.mail.close()
-                    handler.mail.logout()
-                except:
-                    pass
-                handler.mail = None
-                CONNECTIONS.set(sum(1 for h in self.handlers if h.mail is not None))
-            
-            # Prevent tight retry loops
-            if not notimail_config.shutdown_in_progress:
-                time.sleep(5)
+from notimail.imap import (
+    EmailProcessor, IMAPHandler, MultiIMAPHandler, connection_watchdog,
+)
 
 def shutdown_handler(signum, frame):
     logging.info("Shutdown signal received. Cleaning up...")
-    notimail_config.notimail_config.shutdown_in_progress = True
+    notimail_config.shutdown_in_progress = True
     
     try:
         # Send a byte through the socket pair to unblock any select operations
@@ -550,13 +246,14 @@ def multi_account_main():
         else:
             logging.info("FlaskHost or FlaskPort not specified. Web interface will not be started.")
 
+    global multi_handler
+    multi_handler = MultiIMAPHandler(accounts, metrics=metrics, db_path=db_path)
+
     # Start a watchdog thread to monitor handler threads
-    watchdog_thread = threading.Thread(target=connection_watchdog, name="watchdog")
+    watchdog_thread = threading.Thread(target=connection_watchdog, args=(multi_handler,), name="watchdog")
     watchdog_thread.daemon = True
     watchdog_thread.start()
 
-    global multi_handler
-    multi_handler = MultiIMAPHandler(accounts)
     multi_handler.run()
 
     logging.info("Logging out and closing connections...")
@@ -566,48 +263,6 @@ def multi_account_main():
                 handler.mail.logout()
     except:
         pass
-
-def connection_watchdog():
-    """Monitor all handlers and restart threads if needed"""
-    while not notimail_config.shutdown_in_progress:
-        time.sleep(60)  # Check every minute
-        
-        if notimail_config.shutdown_in_progress:
-            break
-            
-        # Check if all threads are alive
-        for i, thread in enumerate(multi_handler.threads):
-            if not thread.is_alive() and not notimail_config.shutdown_in_progress:
-                handler = multi_handler.handlers[i]
-                logging.warning(f"Thread for {handler.email_user} - {handler.folder} has died. Restarting...")
-                
-                # Clean up old connection if any
-                if handler.mail:
-                    try:
-                        handler.mail.close()
-                        handler.mail.logout()
-                    except:
-                        pass
-                    handler.mail = None
-                
-                # Reset handler state
-                handler.healthy = True
-                
-                # Start a new thread
-                new_thread = threading.Thread(target=multi_handler.monitor_account, 
-                                             args=(handler,), 
-                                             name=f"{handler.email_user}-{handler.folder}")
-                new_thread.daemon = True
-                multi_handler.threads[i] = new_thread
-                new_thread.start()
-                
-                # Send notification about thread restart
-                if handler.notifier:
-                    try:
-                        handler.notifier.send_notification("Thread Restarted", 
-                                                         f"Monitoring thread for {handler.email_user} - {handler.folder} has been restarted")
-                    except:
-                        pass
 
 def print_config():
     for section in config.sections():
