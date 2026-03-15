@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Login - NotiMail{% endblock %}
+{% block content %}
+<div style="max-width: 400px; margin: 80px auto;">
+    <div class="card">
+        <h2 style="margin-bottom: 20px;">NotiMail Login</h2>
+        <form method="POST" action="{{ url_for('web.login') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autofocus>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required>
+            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 8px;">Log In</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
