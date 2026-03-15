@@ -261,6 +261,11 @@ def create_account():
         if not data.get(field):
             return jsonify({'error': f'Missing required field: {field}'}), 400
 
+    # Check host limit warnings
+    warning = None
+    if g.host_limits:
+        warning = g.host_limits.check_limit_warning(data['host'], 1)
+
     account_id = db.add_email_account(
         user_id=g.api_user_id,
         account_name=data['account_name'],
@@ -283,7 +288,10 @@ def create_account():
                 config_encrypted=crypto.encrypt(json.dumps(notif_config)),
             )
 
-    return jsonify({'id': account_id, 'status': 'created'}), 201
+    result = {'id': account_id, 'status': 'created'}
+    if warning:
+        result['warning'] = warning
+    return jsonify(result), 201
 
 
 @api_bp.route('/accounts/<int:account_id>', methods=['GET'])
@@ -505,6 +513,7 @@ def create_app(
     config: dict,
     rate_limiter: Optional[RateLimiter] = None,
     multi_handler: Any = None,
+    host_limits: Any = None,
 ) -> Flask:
     """Create and configure the Flask application.
 
@@ -514,6 +523,7 @@ def create_app(
         config: Dict-like config (ConfigParser or dict) with GENERAL settings.
         rate_limiter: Optional RateLimiter instance. Created with defaults if None.
         multi_handler: The MultiIMAPHandler instance (may be None at startup).
+        host_limits: Optional HostLimitManager for connection limit warnings.
 
     Returns:
         A configured Flask application.
@@ -562,6 +572,7 @@ def create_app(
         g.crypto = crypto
         g.rate_limiter = rate_limiter
         g.multi_handler = multi_handler
+        g.host_limits = host_limits
 
     # Register blueprints
     app.register_blueprint(web_bp)

@@ -12,6 +12,7 @@ a web dashboard with login, and a REST API for mail client registration.
 
 import datetime
 import logging
+import os
 import signal
 import socket
 import sys
@@ -84,6 +85,7 @@ def main():
     from notimail.crypto import CryptoManager
     from notimail.migrate import should_migrate, migrate_from_config
     from notimail.accounts import load_accounts_from_db
+    from notimail.host_limits import HostLimitManager
     from notimail.web import create_app
 
     # Initialize encryption
@@ -132,6 +134,10 @@ def main():
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGHUP, reload_config_handler)
 
+    # Initialize host limit manager
+    limits_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'known_host_limits.ini')
+    host_limits = HostLimitManager(limits_path)
+
     logging.info("NotiMail v3 starting...")
 
     # Create and start Flask web app
@@ -147,7 +153,7 @@ def main():
 
     if flask_host and flask_port_str:
         flask_port = int(flask_port_str)
-        app = create_app(db, crypto, config, multi_handler=multi_handler)
+        app = create_app(db, crypto, config, multi_handler=multi_handler, host_limits=host_limits)
         flask_thread = threading.Thread(
             target=lambda: app.run(host=flask_host, port=flask_port, use_reloader=False),
             name="flask",
