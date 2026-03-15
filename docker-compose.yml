@@ -1,0 +1,14 @@
+services:
+  notimail:
+    image: ghcr.io/pepper3k/notimail:main
+    # To build locally instead, comment out 'image' and uncomment 'build':
+    # build: .
+    container_name: notimail
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8080:8080"   # Flask web interface
+      - "8000:8000"   # Prometheus metrics

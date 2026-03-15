@@ -1,0 +1,12 @@
+.git
+.github
+data/
+logs/
+config/
+*.md
+*.sample
+man/
+__pycache__
+*.pyc
+.dockerignore
+docker-compose.yml

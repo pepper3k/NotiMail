@@ -1,0 +1,89 @@
+[GENERAL]
+LogFileLocation = /app/logs/notimail.log
+DataBaseLocation = /app/data/processed_emails.db
+#LogRotationType can be "size" or "time"
+LogRotationType = size
+#LogRotationSize - Only if size is selected - default is 10 MB
+LogRotationSize = 10485760
+#LogRotationInterval - Only if time is selected - in days
+LogRotationInterval = 7
+LogBackupCount = 5
+
+# API Key used to access private information
+#APIKey = YouApiKeyHERE!
+
+# Prometheus configuration won't be enabled if not specified or if the required libraries are not present.
+#PrometheusHost = 0.0.0.0
+#PrometheusPort = 8000
+
+# API Flask Interface won't be enabled if not specified or if the required libraries are not present.
+#FlaskHost = 0.0.0.0
+#FlaskPort = 8080
+
+[EMAIL:account1]
+EmailUser = your@address.com
+EmailPass = YourPassword
+Host = mail.example.com
+#Folders = inbox, sent
+
+# Uncomment and configure the following sections for account-specific notification providers
+
+#[NTFY:account1]
+#Url1 = https://ntfy.sh/TOPIC1
+#Token1 = Optional token to send notifications to protected topics
+#Url2 = https://ntfy.sh/TOPIC2
+#Token2 = Optional token to send notifications to protected topics
+
+#[PUSHOVER:account1]
+#ApiToken = YOUR_PUSHOVER_API_TOKEN
+#UserKey = YOUR_PUSHOVER_USER_KEY
+
+#[GOTIFY:account1]
+#Url = https://gotify.example.com/message
+#Token = your_gotify_token
+
+#[APPRISE:account1]
+#urls = pover://user@token, discord://webhook_id/webhook_token
+
+#[EMAIL:account2]
+#EmailUser = your@address.com
+#EmailPass = YourPassword
+#Host = mail.server.com
+#Folders = inbox, sent
+
+# Uncomment and configure the following sections for account-specific notification providers
+
+#[NTFY:account2]
+#Url1 = https://ntfy.sh/TOPIC3
+#Token1 = Optional token
+#Url2 = https://ntfy.sh/TOPIC4
+#Token2 = Optional token
+
+#[PUSHOVER:account2]
+#ApiToken = YOUR_PUSHOVER_API_TOKEN
+#UserKey = YOUR_PUSHOVER_USER_KEY
+
+#[GOTIFY:account2]
+#Url = https://gotify.example.com/message
+#Token = your_gotify_token
+
+#[APPRISE:account2]
+#urls = pover://user@token, discord://webhook_id/webhook_token
+
+# Global notification providers
+# If no account-specific notification providers are defined, these will be used - please, set at least one notification provider
+
+[NTFY]
+Url1 = https://ntfy.example.com/global_topic
+Token1 = Optional global token
+
+#[PUSHOVER]
+#ApiToken = YOUR_GLOBAL_PUSHOVER_API_TOKEN
+#UserKey = YOUR_GLOBAL_PUSHOVER_USER_KEY
+
+#[GOTIFY]
+#Url = https://gotify.example.com/message
+#Token = your_global_gotify_token
+
+#[APPRISE]
+#urls = pover://user@token, discord://webhook_id/webhook_token
