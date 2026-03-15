@@ -13,7 +13,6 @@ processed repeatedly.
 
 import imaplib
 import email
-import requests
 import time
 import socket
 import sqlite3
@@ -268,114 +267,12 @@ class EmailProcessor:
             ERRORS.inc()
             raise  # Re-raise to trigger reconnection
 
-class NotificationProvider:
-    def send_notification(self, mail_from, mail_subject):
-        raise NotImplementedError("Subclasses must implement this method")
-
+from notimail.notifications import (
+    NotificationProvider, NTFYNotificationProvider, PushoverNotificationProvider,
+    GotifyNotificationProvider, Notifier, parse_notification_providers,
+)
 if apprise_available:
-    class AppriseNotificationProvider(NotificationProvider):
-        def __init__(self, apprise_config):
-            self.apprise = apprise.Apprise()
-            for service_url in apprise_config:
-                self.apprise.add(service_url.strip())
-
-        def send_notification(self, mail_from, mail_subject):
-            mail_subject = mail_subject if mail_subject is not None else "No Subject"
-            mail_from = mail_from if mail_from is not None else "Unknown Sender"
-            message = f"{mail_from}"
-            if not self.apprise.notify(title=mail_subject, body=message):
-                logging.error("Failed to send notification via Apprise.")
-else:
-    pass  # Apprise is not available; skip defining the provider
-
-class NTFYNotificationProvider(NotificationProvider):
-    def __init__(self, ntfy_data):
-        self.ntfy_data = ntfy_data
-
-    def send_notification(self, mail_from, mail_subject):
-        mail_subject = mail_subject if mail_subject is not None else "No Subject"
-        mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        encoded_from = mail_from.encode('utf-8')
-        encoded_subject = mail_subject.encode('utf-8')
-
-        for ntfy_url, token in self.ntfy_data:
-            headers = {"Title": encoded_subject}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            try:
-                response = requests.post(ntfy_url, data=encoded_from, headers=headers)
-                if response.status_code == 200:
-                    logging.info(f"Notification sent successfully to {ntfy_url} via ntfy")
-                else:
-                    logging.error(f"Failed to send notification to {ntfy_url} via NTFY. Status Code: {response.status_code}")
-                    ERRORS.inc()
-            except requests.RequestException as e:
-                logging.error(f"An error occurred while sending notification to {ntfy_url} via NTFY: {str(e)}")
-                ERRORS.inc()
-            finally:
-                time.sleep(2)
-
-class PushoverNotificationProvider(NotificationProvider):
-    def __init__(self, api_token, user_key):
-        self.api_token = api_token
-        self.user_key = user_key
-        self.pushover_url = "https://api.pushover.net/1/messages.json"
-
-    def send_notification(self, mail_from, mail_subject):
-        mail_subject = mail_subject if mail_subject is not None else "No Subject"
-        mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        message = f"From: {mail_from}\nSubject: {mail_subject}"
-
-        data = {
-            "token": self.api_token,
-            "user": self.user_key,
-            "message": message
-        }
-
-        try:
-            response = requests.post(self.pushover_url, data=data)
-            if response.status_code == 200:
-                logging.info("Notification sent successfully via Pushover")
-            else:
-                logging.error(f"Failed to send notification via Pushover. Status Code: {response.status_code}")
-                ERRORS.inc()
-        except requests.RequestException as e:
-            logging.error(f"An error occurred while sending notification via Pushover: {str(e)}")
-            ERRORS.inc()
-
-class GotifyNotificationProvider(NotificationProvider):
-    def __init__(self, gotify_url, gotify_token):
-        self.gotify_url = gotify_url
-        self.gotify_token = gotify_token
-
-    def send_notification(self, mail_from, mail_subject):
-        mail_subject = mail_subject if mail_subject is not None else "No Subject"
-        mail_from = mail_from if mail_from is not None else "Unknown Sender"
-        message = f"From: {mail_from}\nSubject: {mail_subject}"
-        url_with_token = f"{self.gotify_url}?token={self.gotify_token}"
-        payload = {
-            "title": mail_subject,
-            "message": message,
-            "priority": 5
-        }
-        try:
-            response = requests.post(url_with_token, json=payload)
-            if response.status_code == 200:
-                logging.info("Notification sent successfully via Gotify")
-            else:
-                logging.error(f"Failed to send notification via Gotify. Status Code: {response.status_code}")
-                ERRORS.inc()
-        except requests.RequestException as e:
-            logging.error(f"An error occurred while sending notification via Gotify: {str(e)}")
-            ERRORS.inc()
-
-class Notifier:
-    def __init__(self, providers):
-        self.providers = providers
-
-    def send_notification(self, mail_from, mail_subject):
-        for provider in self.providers:
-            provider.send_notification(mail_from, mail_subject)
+    from notimail.notifications import AppriseNotificationProvider
 
 class IMAPHandler:
     def __init__(self, host, email_user, email_pass, folder="inbox", notifier=None):
@@ -645,63 +542,10 @@ def reload_configuration():
     logging.info("Configuration reloaded.")
     # Implement logic to update handlers and notifiers if necessary
 
-def parse_notification_providers(account_name=None):
-    providers = []
-    # Determine which sections to read based on account_name
-    if account_name:
-        # Only include sections specific to this account
-        sections_to_check = [section for section in config.sections() if section.endswith(f":{account_name}")]
-    else:
-        # Exclude account-specific sections
-        sections_to_check = [section for section in config.sections() if ':' not in section]
-
-    # NTFY providers
-    ntfy_sections = [s for s in sections_to_check if s.startswith('NTFY')]
-    ntfy_data = []
-    for section in ntfy_sections:
-        for key in config[section]:
-            if key.lower().startswith("url"):
-                url = config[section][key]
-                index = key[3:]  # e.g., '1'
-                token_key = f"Token{index}"
-                token = config[section].get(token_key, None)
-                ntfy_data.append((url, token))
-    if ntfy_data:
-        providers.append(NTFYNotificationProvider(ntfy_data))
-
-    # Pushover provider
-    pushover_sections = [s for s in sections_to_check if s.startswith('PUSHOVER')]
-    for section in pushover_sections:
-        if 'ApiToken' in config[section] and 'UserKey' in config[section]:
-            api_token = config[section]['ApiToken']
-            user_key = config[section]['UserKey']
-            providers.append(PushoverNotificationProvider(api_token, user_key))
-            break
-
-    # Gotify provider
-    gotify_sections = [s for s in sections_to_check if s.startswith('GOTIFY')]
-    for section in gotify_sections:
-        if 'Url' in config[section] and 'Token' in config[section]:
-            gotify_url = config[section]['Url']
-            gotify_token = config[section]['Token']
-            providers.append(GotifyNotificationProvider(gotify_url, gotify_token))
-            break
-
-    # Apprise providers (only if apprise is available)
-    if apprise_available:
-        apprise_sections = [s for s in sections_to_check if s.startswith('APPRISE')]
-        for section in apprise_sections:
-            if 'urls' in config[section]:
-                apprise_urls = config[section]['urls'].split(',')
-                providers.append(AppriseNotificationProvider(apprise_urls))
-                break
-
-    return providers
-
 def multi_account_main():
     accounts = []
     # Parse global notification providers
-    global_providers = parse_notification_providers()
+    global_providers = parse_notification_providers(config, errors_metric=ERRORS)
     if global_providers:
         global_notifier = Notifier(global_providers)
     else:
@@ -720,7 +564,7 @@ def multi_account_main():
                     'Notifier': None
                 }
                 # Parse account-specific notification providers
-                account_providers = parse_notification_providers(account_name)
+                account_providers = parse_notification_providers(config, account_name, errors_metric=ERRORS)
                 if account_providers:
                     account['Notifier'] = Notifier(account_providers)
                 else:
@@ -822,7 +666,7 @@ def print_config():
 
 def test_config():
     logging.info("Testing global notification providers...")
-    global_providers = parse_notification_providers()
+    global_providers = parse_notification_providers(config, errors_metric=ERRORS)
     if global_providers:
         global_notifier = Notifier(global_providers)
         try:
@@ -844,7 +688,7 @@ def test_config():
                 handler.mail.logout()
             except Exception as e:
                 logging.error(f"Connection failed for {section}. Reason: {str(e)}")
-            account_providers = parse_notification_providers(account_name)
+            account_providers = parse_notification_providers(config, account_name, errors_metric=ERRORS)
             if account_providers:
                 account_notifier = Notifier(account_providers)
                 try:
@@ -898,7 +742,7 @@ def initial_checks():
     
     # Test sending a test notification via global providers
     try:
-        global_providers = parse_notification_providers()
+        global_providers = parse_notification_providers(config, errors_metric=ERRORS)
         if not global_providers:
             print("Warning: no global notification providers configured for the test.")
             logging.warning("Warning: no global notification providers configured for the test.")
