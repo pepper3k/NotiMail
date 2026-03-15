@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NotiMail
-Version: 2.0.2
+Version: 3.0.0
 Author: Stefano Marinelli <stefano@dragas.it>
 License: BSD 3-Clause License
 
@@ -9,34 +9,11 @@ NotiMail is a script designed to monitor one or more email inboxes using the IMA
 and send notifications via HTTP POST requests when a new email arrives. This version includes
 additional features to store processed email UIDs in a SQLite3 database and ensure they are not
 processed repeatedly.
-
-The script uses:
-- IMAP to connect to one or more email server(s)
-- IDLE mode to wait for new emails
-- Sends a notification containing the sender and subject of the new email upon receipt
-- Maintains a SQLite database to keep track of processed emails
-
-Python Dependencies:
-- imaplib: For handling IMAP connections.
-- email: For parsing received emails.
-- requests: For sending HTTP POST notifications.
-- configparser: For reading the configuration from a file.
-- time, socket: For handling timeouts and delays.
-- sqlite3: For database operations.
-- datetime: For date and time operations.
-- signal, sys: For handling script shutdown and signals.
-- threading: To deal with multiple inboxes.
-- os, select: For handling socket pairs and interrupting blocking calls.
-- BytesParser from email.parser: For parsing raw email data.
-- apprise: For Apprise notifications
 """
-
-#!/usr/bin/env python3
 
 import imaplib
 import email
 import requests
-import configparser
 import time
 import socket
 import sqlite3
@@ -44,141 +21,40 @@ import datetime
 import signal
 import sys
 import logging
-import argparse
 import threading
 import os
 import select
 from email import policy
 from email.parser import BytesParser
 from threading import Lock
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
-# Create a global socket pair to handle shutdown
-shutdown_sock_r, shutdown_sock_w = socket.socketpair()
-shutdown_sock_r.setblocking(0)
-shutdown_sock_w.setblocking(0)
+import notimail.config as notimail_config
+from notimail.config import (
+    parse_args, load_config, validate_config, setup_logging, setup_prometheus,
+    shutdown_sock_r, shutdown_sock_w,
+    MAX_RETRY_ATTEMPTS, RETRY_DELAY, IDLE_TIMEOUT,
+    apprise_available, flask_available, prometheus_available,
+)
 
-# Global flag to indicate shutdown in progress
-shutdown_in_progress = False
-
-# Maximum number of retry attempts for connections
-MAX_RETRY_ATTEMPTS = 5
-# Delay between retry attempts (in seconds)
-RETRY_DELAY = 30
-# IDLE timeout to ensure we periodically check connection status (in seconds)
-IDLE_TIMEOUT = 600  # 10 minutes
-
-# Conditional import of Apprise
-try:
-    import apprise
-    apprise_available = True
-except ImportError:
-    apprise_available = False
-
-# Conditional import of Flask
-try:
+# Conditional import of Flask (re-imported here for route definitions)
+if flask_available:
     from flask import Flask, jsonify, request
-    flask_available = True
-except ImportError:
-    flask_available = False
 
-# Conditional import of Prometheus client
-try:
-    from prometheus_client import start_http_server, Counter, Histogram
-    from prometheus_client import Gauge, Summary
-    prometheus_available = True
-except ImportError:
-    prometheus_available = False
-
-# Argument parsing to get the config file path
-parser = argparse.ArgumentParser(description='NotiMail Notification Service.')
-parser.add_argument('-c', '--config', type=str, default='config.ini', help='Path to the configuration file.')
-parser.add_argument('--print-config', action='store_true', help='Print the configuration options from config.ini')
-parser.add_argument('--test-config', action='store_true', help='Test the configuration options to ensure they work properly')
-parser.add_argument('--list-folders', action='store_true', help='List all IMAP folders of the configured mailboxes')
-args = parser.parse_args()
-
-# Read configuration
-config = configparser.ConfigParser()
-config.read(args.config)
-
-def validate_config(config):
-    required_sections = ['GENERAL']
-    if not any(section.startswith('EMAIL') for section in config.sections()):
-        raise ValueError("At least one EMAIL section is required.")
-    # Add more validation as needed
-
+# Parse arguments and load configuration
+args = parse_args()
+config = load_config(args.config)
 validate_config(config)
 
-# Logging setup using configuration (or default if not set)
-log_file_location = config.get('GENERAL', 'LogFileLocation', fallback='notimail.log')
-log_rotation_type = config.get('GENERAL', 'LogRotationType', fallback='size')
-log_rotation_size = config.getint('GENERAL', 'LogRotationSize', fallback=10485760)  # 10MB
-log_rotation_interval = config.getint('GENERAL', 'LogRotationInterval', fallback=1)  # 1 day
-log_backup_count = config.getint('GENERAL', 'LogBackupCount', fallback=5)
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-if log_rotation_type == 'size':
-    handler = RotatingFileHandler(log_file_location, maxBytes=log_rotation_size, backupCount=log_backup_count)
-elif log_rotation_type == 'time':
-    handler = TimedRotatingFileHandler(log_file_location, when='midnight', interval=log_rotation_interval, backupCount=log_backup_count)
-else:
-    raise ValueError(f"Invalid LogRotationType: {log_rotation_type}")
-
-formatter = logging.Formatter('%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-# Add a console handler for better debugging
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
-logging.info("Module availability:")
-logging.info(f" - Apprise available: {apprise_available}")
-logging.info(f" - Flask available: {flask_available}")
-logging.info(f" - Prometheus client available: {prometheus_available}")
-
-# Start Prometheus metrics server if available and configured
-prometheus_host = config.get('GENERAL', 'PrometheusHost', fallback=None)
-prometheus_port = config.getint('GENERAL', 'PrometheusPort', fallback=None)
-
-if prometheus_available and prometheus_host and prometheus_port:
-    try:
-        start_http_server(prometheus_port, addr=prometheus_host)
-        logging.info(f"Prometheus metrics server started on {prometheus_host}:{prometheus_port}")
-        EMAILS_PROCESSED = Counter('emails_processed_total', 'Total number of emails processed')
-        NOTIFICATIONS_SENT = Counter('notifications_sent_total', 'Total number of notifications sent')
-        PROCESSING_TIME = Histogram('email_processing_seconds', 'Time spent processing emails')
-        ERRORS = Counter('errors_total', 'Total number of errors encountered')
-        CONNECTIONS = Gauge('active_connections', 'Number of active IMAP connections')
-        RECONNECTS = Counter('reconnect_attempts_total', 'Total number of reconnection attempts')
-        IDLE_TIMEOUTS = Counter('idle_timeouts_total', 'Total number of IDLE timeouts')
-    except Exception as e:
-        logging.error(f"Failed to start Prometheus metrics server: {str(e)}")
-        prometheus_available = False
-else:
-    if not prometheus_available:
-        logging.info("Prometheus client library is not available. Metrics will not be exposed.")
-    else:
-        logging.info("PrometheusHost or PrometheusPort not specified. Metrics will not be exposed.")
-    class DummyMetric:
-        def inc(self, amount=1):
-            pass
-        def set(self, value):
-            pass
-        def time(self):
-            class DummyTimer:
-                def __enter__(self):
-                    pass
-                def __exit__(self, exc_type, exc_val, exc_tb):
-                    pass
-            return DummyTimer()
-    EMAILS_PROCESSED = NOTIFICATIONS_SENT = ERRORS = RECONNECTS = IDLE_TIMEOUTS = DummyMetric()
-    CONNECTIONS = DummyMetric()
-    PROCESSING_TIME = DummyMetric()
+# Setup logging and Prometheus metrics
+log_file_location = setup_logging(config)
+metrics = setup_prometheus(config)
+EMAILS_PROCESSED = metrics['EMAILS_PROCESSED']
+NOTIFICATIONS_SENT = metrics['NOTIFICATIONS_SENT']
+PROCESSING_TIME = metrics['PROCESSING_TIME']
+ERRORS = metrics['ERRORS']
+CONNECTIONS = metrics['CONNECTIONS']
+RECONNECTS = metrics['RECONNECTS']
+IDLE_TIMEOUTS = metrics['IDLE_TIMEOUTS']
 
 # Flask web interface setup
 flask_host = config.get('GENERAL', 'FlaskHost', fallback=None)
@@ -515,7 +391,7 @@ class IMAPHandler:
         self.healthy = True  # Track if this connection is healthy
 
     def connect(self):
-        if shutdown_in_progress:
+        if notimail_config.shutdown_in_progress:
             return False
             
         if self.mail is not None:
@@ -565,7 +441,7 @@ class IMAPHandler:
             return False
 
     def idle(self):
-        if not self.mail or shutdown_in_progress:
+        if not self.mail or notimail_config.shutdown_in_progress:
             return False
             
         logging.info(f"[{self.email_user} - {self.folder}] IDLE mode started. Waiting for new email...")
@@ -666,7 +542,7 @@ class MultiIMAPHandler:
         logging.info(f"Monitoring {handler.email_user} - Folder: {handler.folder}")
         backoff_time = RETRY_DELAY
         
-        while not shutdown_in_progress:
+        while not notimail_config.shutdown_in_progress:
             try:
                 # Attempt to connect
                 if not handler.connect():
@@ -676,7 +552,7 @@ class MultiIMAPHandler:
                     
                     # Check for shutdown while waiting
                     wait_until = time.time() + retry_time
-                    while time.time() < wait_until and not shutdown_in_progress:
+                    while time.time() < wait_until and not notimail_config.shutdown_in_progress:
                         time.sleep(1)
                         
                     continue  # Skip to next iteration to try connecting again
@@ -685,7 +561,7 @@ class MultiIMAPHandler:
                 backoff_time = RETRY_DELAY
                 
                 # Monitor mailbox until an error occurs
-                while handler.healthy and not shutdown_in_progress:
+                while handler.healthy and not notimail_config.shutdown_in_progress:
                     idle_result = handler.idle()
                     if not idle_result:
                         break  # IDLE failed, so we need to reconnect
@@ -727,13 +603,12 @@ class MultiIMAPHandler:
                 CONNECTIONS.set(sum(1 for h in self.handlers if h.mail is not None))
             
             # Prevent tight retry loops
-            if not shutdown_in_progress:
+            if not notimail_config.shutdown_in_progress:
                 time.sleep(5)
 
 def shutdown_handler(signum, frame):
-    global shutdown_in_progress
     logging.info("Shutdown signal received. Cleaning up...")
-    shutdown_in_progress = True
+    notimail_config.notimail_config.shutdown_in_progress = True
     
     try:
         # Send a byte through the socket pair to unblock any select operations
@@ -898,15 +773,15 @@ def multi_account_main():
 
 def connection_watchdog():
     """Monitor all handlers and restart threads if needed"""
-    while not shutdown_in_progress:
+    while not notimail_config.shutdown_in_progress:
         time.sleep(60)  # Check every minute
         
-        if shutdown_in_progress:
+        if notimail_config.shutdown_in_progress:
             break
             
         # Check if all threads are alive
         for i, thread in enumerate(multi_handler.threads):
-            if not thread.is_alive() and not shutdown_in_progress:
+            if not thread.is_alive() and not notimail_config.shutdown_in_progress:
                 handler = multi_handler.handlers[i]
                 logging.warning(f"Thread for {handler.email_user} - {handler.folder} has died. Restarting...")
                 
