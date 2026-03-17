@@ -20,7 +20,7 @@ from notimail.auth import (
     check_password, hash_password, generate_api_key, validate_api_key,
     create_invite, redeem_invite, RateLimiter,
 )
-from notimail.crypto import CryptoManager
+from notimail.crypto import CryptoManager, UserKeyCache
 from notimail.database import DatabaseHandler
 
 
@@ -145,6 +145,12 @@ def login():
     session.permanent = True
     db.update_user_last_login(user['id'])
 
+    # Cache per-user encryption key (derived from password + salt)
+    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
+    if user_key_cache and user.get('key_salt'):
+        salt_bytes = bytes.fromhex(user['key_salt'])
+        user_key_cache.store(user['id'], password, salt_bytes)
+
     logging.info(f"User logged in: {session['username']} (id={user['id']})")
     return redirect(url_for('web.dashboard'))
 
@@ -153,6 +159,11 @@ def login():
 def logout():
     """Clear the session and redirect to login."""
     username = session.get('username', 'unknown')
+    user_id = session.get('user_id')
+    # Remove cached per-user encryption key
+    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
+    if user_key_cache and user_id is not None:
+        user_key_cache.remove(user_id)
     session.clear()
     logging.info(f"User logged out: {username}")
     return redirect(url_for('web.login'))
@@ -183,6 +194,14 @@ def dashboard():
     total_users = db.count_users()
     total_accounts = db.count_email_accounts()
 
+    # Check for locked per-user-encrypted accounts
+    locked_accounts = 0
+    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
+    user_encrypted_count = db.count_user_encrypted_accounts(session['user_id'])
+    if user_encrypted_count > 0 and user_key_cache:
+        if user_key_cache.get(session['user_id']) is None:
+            locked_accounts = user_encrypted_count
+
     return render_template('dashboard.html',
                          username=session.get('username'),
                          ram_mb=round(ram_mb, 1),
@@ -190,7 +209,8 @@ def dashboard():
                          cpu_system=round(cpu_system, 2),
                          active_connections=active_connections,
                          total_users=total_users,
-                         total_accounts=total_accounts)
+                         total_accounts=total_accounts,
+                         locked_accounts=locked_accounts)
 
 
 @web_bp.route('/register/<code>', methods=['GET', 'POST'])
@@ -250,21 +270,34 @@ def accounts_page():
     """Account management page."""
     db: DatabaseHandler = g.db
     crypto: CryptoManager = g.crypto
+    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
     raw_accounts = db.get_email_accounts_for_user(session['user_id'])
     accounts = []
     for acct in raw_accounts:
+        is_user_encrypted = bool(acct.get('user_encrypted'))
         try:
+            if is_user_encrypted and user_key_cache:
+                uf = user_key_cache.get(session['user_id'])
+                if uf is None:
+                    raise ValueError("Per-user key not cached")
+                decrypt_fn = lambda ct, f=uf: f.decrypt(ct.encode('utf-8')).decode('utf-8')
+            else:
+                decrypt_fn = crypto.decrypt
             accounts.append({
                 'id': acct['id'],
                 'account_name': acct['account_name'],
-                'email_user': crypto.decrypt(acct['email_user_encrypted']),
-                'host': crypto.decrypt(acct['host_encrypted']),
+                'email_user': decrypt_fn(acct['email_user_encrypted']),
+                'host': decrypt_fn(acct['host_encrypted']),
                 'folders': acct['folders'],
                 'enabled': acct['enabled'],
+                'user_encrypted': is_user_encrypted,
             })
         except Exception:
-            accounts.append({'id': acct['id'], 'account_name': acct['account_name'],
-                           'email_user': '(decrypt error)', 'host': '', 'folders': '', 'enabled': 0})
+            accounts.append({
+                'id': acct['id'], 'account_name': acct['account_name'],
+                'email_user': '(decrypt error)', 'host': '', 'folders': '',
+                'enabled': 0, 'user_encrypted': is_user_encrypted,
+            })
 
     host_status = g.host_limits.get_host_status() if g.host_limits else {}
     return render_template('accounts.html', accounts=accounts, host_status=host_status)
@@ -317,6 +350,72 @@ def delete_account_web(account_id: int):
         return redirect(url_for('web.accounts_page'))
     db.delete_email_account(account_id)
     flash('Account deleted.', 'success')
+    return redirect(url_for('web.accounts_page'))
+
+
+@web_bp.route('/accounts/<int:account_id>/toggle-user-encryption', methods=['POST'])
+@login_required
+def toggle_user_encryption(account_id: int):
+    """Toggle per-user encryption on/off for an email account.
+
+    When turning ON: re-encrypts credentials with the per-user Fernet key.
+    When turning OFF: re-encrypts credentials with the global Fernet key.
+    """
+    db: DatabaseHandler = g.db
+    crypto: CryptoManager = g.crypto
+    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
+
+    acct = db.get_email_account_by_id(account_id)
+    if not acct or acct['user_id'] != session['user_id']:
+        flash('Account not found.', 'error')
+        return redirect(url_for('web.accounts_page'))
+
+    if not user_key_cache:
+        flash('Per-user encryption is not available.', 'error')
+        return redirect(url_for('web.accounts_page'))
+
+    user_fernet = user_key_cache.get(session['user_id'])
+    if user_fernet is None:
+        flash('Your encryption key is not cached. Please log out and log back in.', 'error')
+        return redirect(url_for('web.accounts_page'))
+
+    currently_encrypted = bool(acct.get('user_encrypted'))
+
+    try:
+        if currently_encrypted:
+            # Turning OFF: decrypt with per-user key, re-encrypt with global
+            old_decrypt = lambda ct: user_fernet.decrypt(ct.encode('utf-8')).decode('utf-8')
+            email_user = old_decrypt(acct['email_user_encrypted'])
+            email_pass = old_decrypt(acct['email_pass_encrypted'])
+            host = old_decrypt(acct['host_encrypted'])
+
+            db.update_email_account(
+                account_id,
+                email_user_encrypted=crypto.encrypt(email_user),
+                email_pass_encrypted=crypto.encrypt(email_pass),
+                host_encrypted=crypto.encrypt(host),
+                user_encrypted=0,
+            )
+            flash('Per-user encryption disabled. Credentials re-encrypted with global key.', 'success')
+        else:
+            # Turning ON: decrypt with global key, re-encrypt with per-user key
+            email_user = crypto.decrypt(acct['email_user_encrypted'])
+            email_pass = crypto.decrypt(acct['email_pass_encrypted'])
+            host = crypto.decrypt(acct['host_encrypted'])
+
+            new_encrypt = lambda pt: user_fernet.encrypt(pt.encode('utf-8')).decode('utf-8')
+            db.update_email_account(
+                account_id,
+                email_user_encrypted=new_encrypt(email_user),
+                email_pass_encrypted=new_encrypt(email_pass),
+                host_encrypted=new_encrypt(host),
+                user_encrypted=1,
+            )
+            flash('Per-user encryption enabled. Credentials re-encrypted with your personal key.', 'success')
+    except Exception as e:
+        logging.error(f"Failed to toggle per-user encryption for account {account_id}: {e}")
+        flash('Failed to toggle encryption. Credentials unchanged.', 'error')
+
     return redirect(url_for('web.accounts_page'))
 
 
@@ -857,6 +956,7 @@ def create_app(
     rate_limiter: Optional[RateLimiter] = None,
     multi_handler: Any = None,
     host_limits: Any = None,
+    user_key_cache: Optional[UserKeyCache] = None,
 ) -> Flask:
     """Create and configure the Flask application.
 
@@ -867,6 +967,7 @@ def create_app(
         rate_limiter: Optional RateLimiter instance. Created with defaults if None.
         multi_handler: The MultiIMAPHandler instance (may be None at startup).
         host_limits: Optional HostLimitManager for connection limit warnings.
+        user_key_cache: Optional UserKeyCache for per-user encryption support.
 
     Returns:
         A configured Flask application.
@@ -916,6 +1017,7 @@ def create_app(
         g.rate_limiter = rate_limiter
         g.multi_handler = multi_handler
         g.host_limits = host_limits
+        g.user_key_cache = user_key_cache
 
     # Register blueprints
     app.register_blueprint(web_bp)

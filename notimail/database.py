@@ -262,6 +262,12 @@ class DatabaseHandler:
                 used INTEGER NOT NULL DEFAULT 0
             )""",
         ]),
+        (3, [
+            # Per-user PBKDF2 salt for deriving per-user encryption keys
+            """ALTER TABLE users ADD COLUMN key_salt TEXT""",
+            # Flag indicating whether an account's credentials use per-user encryption
+            """ALTER TABLE email_accounts ADD COLUMN user_encrypted INTEGER NOT NULL DEFAULT 0""",
+        ]),
     ]
 
     def apply_migrations(self) -> None:
@@ -300,6 +306,21 @@ class DatabaseHandler:
             conn.commit()
             logging.info(f"Migration v{version} applied successfully.")
 
+            # Post-migration hooks
+            if version == 3:
+                # Backfill key_salt for existing users that don't have one
+                rows = conn.execute(
+                    "SELECT id FROM users WHERE key_salt IS NULL"
+                ).fetchall()
+                for (uid,) in rows:
+                    salt_hex = secrets.token_hex(16)  # 16 bytes = 32 hex chars
+                    conn.execute(
+                        "UPDATE users SET key_salt = ? WHERE id = ?",
+                        (salt_hex, uid))
+                if rows:
+                    conn.commit()
+                    logging.info(f"Backfilled key_salt for {len(rows)} existing user(s).")
+
     # ------------------------------------------------------------------
     # User operations
     # ------------------------------------------------------------------
@@ -314,6 +335,9 @@ class DatabaseHandler:
     ) -> int:
         """Create a new user and return their ID.
 
+        A random 16-byte key_salt is generated automatically for PBKDF2
+        key derivation (used by per-user encryption).
+
         Args:
             username_encrypted: Fernet-encrypted username.
             username_lookup: HMAC-SHA256 hash of the username for lookups.
@@ -326,10 +350,11 @@ class DatabaseHandler:
         """
         conn = self._get_conn()
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        key_salt = secrets.token_hex(16)
         cursor = conn.execute(
-            "INSERT INTO users (username, username_lookup, password_hash, role, invited_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (username_encrypted, username_lookup, password_hash, role, invited_by, now))
+            "INSERT INTO users (username, username_lookup, password_hash, role, invited_by, created_at, key_salt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (username_encrypted, username_lookup, password_hash, role, invited_by, now, key_salt))
         conn.commit()
         return cursor.lastrowid
 
@@ -345,7 +370,7 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
-            "COALESCE(enabled, 1) as enabled FROM users WHERE username_lookup = ?",
+            "COALESCE(enabled, 1) as enabled, key_salt FROM users WHERE username_lookup = ?",
             (username_lookup,))
         row = cursor.fetchone()
         if row is None:
@@ -354,6 +379,7 @@ class DatabaseHandler:
             'id': row[0], 'username': row[1], 'username_lookup': row[2],
             'password_hash': row[3], 'role': row[4], 'invited_by': row[5],
             'created_at': row[6], 'last_login': row[7], 'enabled': row[8],
+            'key_salt': row[9],
         }
 
     def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
@@ -361,7 +387,7 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
-            "COALESCE(enabled, 1) as enabled FROM users WHERE id = ?",
+            "COALESCE(enabled, 1) as enabled, key_salt FROM users WHERE id = ?",
             (user_id,))
         row = cursor.fetchone()
         if row is None:
@@ -370,6 +396,7 @@ class DatabaseHandler:
             'id': row[0], 'username': row[1], 'username_lookup': row[2],
             'password_hash': row[3], 'role': row[4], 'invited_by': row[5],
             'created_at': row[6], 'last_login': row[7], 'enabled': row[8],
+            'key_salt': row[9],
         }
 
     def get_all_users(self) -> List[Dict[str, Any]]:
@@ -377,11 +404,12 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
-            "COALESCE(enabled, 1) as enabled FROM users")
+            "COALESCE(enabled, 1) as enabled, key_salt FROM users")
         return [
             {'id': r[0], 'username': r[1], 'username_lookup': r[2],
              'password_hash': r[3], 'role': r[4], 'invited_by': r[5],
-             'created_at': r[6], 'last_login': r[7], 'enabled': r[8]}
+             'created_at': r[6], 'last_login': r[7], 'enabled': r[8],
+             'key_salt': r[9]}
             for r in cursor.fetchall()
         ]
 
@@ -489,6 +517,15 @@ class DatabaseHandler:
         """Return the total number of email accounts."""
         conn = self._get_conn()
         cursor = conn.execute("SELECT COUNT(*) FROM email_accounts")
+        return cursor.fetchone()[0]
+
+    def count_user_encrypted_accounts(self, user_id: int) -> int:
+        """Return the number of per-user-encrypted accounts for a user."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM email_accounts "
+            "WHERE user_id = ? AND COALESCE(user_encrypted, 0) = 1",
+            (user_id,))
         return cursor.fetchone()[0]
 
     # ------------------------------------------------------------------
@@ -645,7 +682,8 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
-            "host_encrypted, port, folders, enabled, created_at, updated_at "
+            "host_encrypted, port, folders, enabled, created_at, updated_at, "
+            "COALESCE(user_encrypted, 0) as user_encrypted "
             "FROM email_accounts WHERE user_id = ?",
             (user_id,))
         return [self._row_to_account(r) for r in cursor.fetchall()]
@@ -655,7 +693,8 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
-            "host_encrypted, port, folders, enabled, created_at, updated_at "
+            "host_encrypted, port, folders, enabled, created_at, updated_at, "
+            "COALESCE(user_encrypted, 0) as user_encrypted "
             "FROM email_accounts WHERE enabled = 1")
         return [self._row_to_account(r) for r in cursor.fetchall()]
 
@@ -664,7 +703,8 @@ class DatabaseHandler:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
-            "host_encrypted, port, folders, enabled, created_at, updated_at "
+            "host_encrypted, port, folders, enabled, created_at, updated_at, "
+            "COALESCE(user_encrypted, 0) as user_encrypted "
             "FROM email_accounts WHERE id = ?",
             (account_id,))
         row = cursor.fetchone()
@@ -692,6 +732,7 @@ class DatabaseHandler:
             'email_user_encrypted': row[3], 'email_pass_encrypted': row[4],
             'host_encrypted': row[5], 'port': row[6], 'folders': row[7],
             'enabled': row[8], 'created_at': row[9], 'updated_at': row[10],
+            'user_encrypted': row[11] if len(row) > 11 else 0,
         }
 
     # ------------------------------------------------------------------

@@ -4,6 +4,16 @@
 <h1 style="margin: 20px 0;">Dashboard</h1>
 <p style="margin-bottom: 20px;">Welcome, <strong>{{ username }}</strong>.</p>
 
+{% if locked_accounts %}
+<div class="card" style="background: #fef3cd; border-left: 4px solid #e67e22; padding: 16px; margin-bottom: 20px;">
+    <strong>{{ locked_accounts }} of your accounts are waiting for you to log in to resume monitoring.</strong>
+    <p style="margin-top: 8px; margin-bottom: 0;">
+        These accounts use per-user encryption. Your encryption key was re-derived when you logged in just now,
+        so they should resume on the next monitoring cycle (within 60 seconds).
+    </p>
+</div>
+{% endif %}
+
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
     <div class="card" style="text-align: center;">
         <h3 style="font-size: 2em; color: #3498db;">{{ total_users }}</h3>

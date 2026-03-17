@@ -130,7 +130,7 @@ def main():
     """Main entry point: initialize crypto, DB, migration, web app, and IMAP handlers."""
     global multi_handler
 
-    from notimail.crypto import CryptoManager
+    from notimail.crypto import CryptoManager, UserKeyCache
     from notimail.migrate import should_migrate, migrate_from_config
     from notimail.accounts import load_accounts_from_db
     from notimail.host_limits import HostLimitManager
@@ -138,6 +138,9 @@ def main():
 
     # Initialize encryption
     crypto = CryptoManager(key_path)
+
+    # Per-user encryption key cache (shared across web + account loader)
+    user_key_cache = UserKeyCache()
 
     # Initialize database and run migrations
     db = DatabaseHandler(db_path)
@@ -165,7 +168,8 @@ def main():
             logging.warning("No admin user found for migration. Skipping config.ini import.")
 
     # Load accounts from database
-    accounts = load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
+    accounts = load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'],
+                                     user_key_cache=user_key_cache)
 
     # Also load any remaining config.ini accounts (backward compat during transition)
     config_accounts = _load_legacy_accounts()
@@ -194,14 +198,16 @@ def main():
 
     # account_loader is called by the watchdog every 60s to detect new/removed accounts
     def _account_loader():
-        return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
+        return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'],
+                                     user_key_cache=user_key_cache)
 
     multi_handler = MultiIMAPHandler(
         accounts, metrics=metrics, db_path=db_path, account_loader=_account_loader)
 
     if flask_host and flask_port_str:
         flask_port = int(flask_port_str)
-        app = create_app(db, crypto, config, multi_handler=multi_handler, host_limits=host_limits)
+        app = create_app(db, crypto, config, multi_handler=multi_handler,
+                         host_limits=host_limits, user_key_cache=user_key_cache)
         flask_thread = threading.Thread(
             target=lambda: app.run(host=flask_host, port=flask_port, use_reloader=False),
             name="flask",

@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from notimail.crypto import CryptoManager
+from notimail.crypto import CryptoManager, UserKeyCache
 from notimail.database import DatabaseHandler
 from notimail.notifications import (
     Notifier, NotificationProvider,
@@ -26,16 +26,21 @@ def load_accounts_from_db(
     db: DatabaseHandler,
     crypto: CryptoManager,
     errors_metric: Optional[Any] = None,
+    user_key_cache: Optional[UserKeyCache] = None,
 ) -> List[Dict[str, Any]]:
     """Load all enabled email accounts from the database.
 
     Decrypts credentials and builds Notifier instances from the
-    associated notification_configs.
+    associated notification_configs.  For accounts with per-user
+    encryption (``user_encrypted=1``), the per-user Fernet key is
+    looked up from *user_key_cache*; if the key is not cached the
+    account is skipped with a warning.
 
     Args:
         db: The DatabaseHandler instance.
         crypto: The CryptoManager for decrypting credentials.
         errors_metric: Prometheus error counter passed to notification providers.
+        user_key_cache: Optional UserKeyCache for per-user encrypted accounts.
 
     Returns:
         A list of account dicts with keys: EmailUser, EmailPass, Host,
@@ -46,11 +51,28 @@ def load_accounts_from_db(
     raw_accounts = db.get_all_enabled_accounts()
 
     for acct in raw_accounts:
+        # Determine which Fernet to use for decryption
+        if acct.get('user_encrypted'):
+            if user_key_cache is None:
+                logging.warning(
+                    f"Account {acct['account_name']} uses per-user encryption "
+                    "but no UserKeyCache is available. Skipping.")
+                continue
+            user_fernet = user_key_cache.get(acct['user_id'])
+            if user_fernet is None:
+                logging.warning(
+                    f"Account {acct['account_name']} uses per-user encryption "
+                    f"but user {acct['user_id']} has not logged in since restart. Skipping.")
+                continue
+            decrypt_fn = lambda ct, f=user_fernet: f.decrypt(ct.encode('utf-8')).decode('utf-8')
+        else:
+            decrypt_fn = crypto.decrypt
+
         # Decrypt credentials
         try:
-            email_user = crypto.decrypt(acct['email_user_encrypted'])
-            email_pass = crypto.decrypt(acct['email_pass_encrypted'])
-            host = crypto.decrypt(acct['host_encrypted'])
+            email_user = decrypt_fn(acct['email_user_encrypted'])
+            email_pass = decrypt_fn(acct['email_pass_encrypted'])
+            host = decrypt_fn(acct['host_encrypted'])
         except Exception as e:
             logging.error(f"Failed to decrypt account {acct['account_name']}: {e}")
             continue
