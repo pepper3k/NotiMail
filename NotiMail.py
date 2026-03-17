@@ -34,9 +34,13 @@ args = parse_args()
 config = load_config(args.config)
 validate_config(config)
 
-# Core paths from config
+# Core paths from config — ensure parent directories exist
 db_path = config.get('GENERAL', 'DataBaseLocation', fallback="processed_emails.db")
 key_path = config.get('GENERAL', 'SecretKeyLocation', fallback='/etc/notimail/secret.key')
+for _path in (db_path, key_path):
+    _dir = os.path.dirname(_path)
+    if _dir:
+        os.makedirs(_dir, exist_ok=True)
 
 # Setup logging and Prometheus metrics
 log_file_location = setup_logging(config)

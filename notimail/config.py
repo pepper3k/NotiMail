@@ -129,6 +129,12 @@ def setup_logging(config: configparser.ConfigParser) -> str:
     log_rotation_interval: int = config.getint('GENERAL', 'LogRotationInterval', fallback=1)
     log_backup_count: int = config.getint('GENERAL', 'LogBackupCount', fallback=5)
 
+    # Ensure the log directory exists
+    import os
+    log_dir = os.path.dirname(log_file_location)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
