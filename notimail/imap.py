@@ -444,7 +444,11 @@ class MultiIMAPHandler:
         }
 
     def run(self) -> None:
-        """Start a monitoring thread for each handler and block until all finish."""
+        """Start monitoring threads and block until shutdown.
+
+        If no accounts are configured, blocks and waits — the watchdog's
+        reload_accounts() will spawn threads as accounts are added via API.
+        """
         self.threads = []
         for handler in self.handlers:
             thread = threading.Thread(
@@ -453,8 +457,17 @@ class MultiIMAPHandler:
             thread.daemon = True
             self.threads.append(thread)
             thread.start()
-        for thread in self.threads:
-            thread.join()
+
+        # Block until shutdown, periodically joining any threads.
+        # This keeps main() alive even when there are no accounts yet.
+        while not notimail_config.shutdown_in_progress:
+            alive_threads = [t for t in self.threads if t.is_alive()]
+            if alive_threads:
+                for t in alive_threads:
+                    t.join(timeout=5)
+            else:
+                # No threads running — sleep and wait for reload_accounts to add some
+                time.sleep(5)
 
     def reload_accounts(self) -> None:
         """Reload accounts from the database and start/stop handlers as needed.
