@@ -32,6 +32,50 @@ from notimail.imap import IMAPHandler, MultiIMAPHandler, connection_watchdog
 # Parse arguments and load configuration
 args = parse_args()
 config = load_config(args.config)
+
+# If config file doesn't exist or has no GENERAL section, generate defaults
+if 'GENERAL' not in config.sections():
+    import logging as _log
+    _default_config_path = args.config
+    _log.warning(
+        f"Config file '{_default_config_path}' not found or missing [GENERAL] section. "
+        "Generating default config with Docker-friendly paths."
+    )
+    _default_content = """\
+[GENERAL]
+# --- Logging ---
+LogFileLocation = /app/logs/notimail.log
+LogRotationType = size
+LogRotationSize = 10485760
+LogRotationInterval = 7
+LogBackupCount = 5
+
+# --- Database ---
+DataBaseLocation = /app/data/notimail.db
+
+# --- Encryption ---
+SecretKeyLocation = /app/secrets/secret.key
+
+# --- Web Interface ---
+FlaskHost = 0.0.0.0
+FlaskPort = 8080
+SessionLifetimeHours = 24
+
+# --- Invite Settings ---
+InviteExpiryDays = 7
+
+# --- Brute-Force Protection ---
+RateLimitMaxAttempts = 5
+RateLimitWindowMinutes = 15
+RateLimitLockoutMinutes = 30
+"""
+    _dir = os.path.dirname(os.path.abspath(_default_config_path))
+    if _dir:
+        os.makedirs(_dir, exist_ok=True)
+    with open(_default_config_path, 'w') as _f:
+        _f.write(_default_content)
+    config = load_config(_default_config_path)
+
 validate_config(config)
 
 # Core paths from config — ensure parent directories exist
