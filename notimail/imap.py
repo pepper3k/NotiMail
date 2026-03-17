@@ -2,11 +2,13 @@
 IMAP connection handlers for NotiMail.
 
 Manages IMAP IDLE connections, email processing, multi-account
-orchestration, and the connection watchdog.
+orchestration, the connection watchdog, and memory-only credential
+mode with reauth push notifications.
 """
 
 import datetime
 import imaplib
+import json
 import logging
 import select
 import socket
@@ -17,6 +19,9 @@ from email.parser import BytesParser
 from email.message import EmailMessage
 from threading import Lock
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, parse_qs
+
+import requests
 
 import notimail.config as notimail_config
 from notimail.config import (
@@ -25,6 +30,63 @@ from notimail.config import (
 )
 from notimail.database import DatabaseHandler
 from notimail.notifications import Notifier
+
+# Thread-safe dict for credential handoff from reauth API to waiting handlers.
+# Maps account_id -> {"email_user": ..., "email_pass": ..., "host": ...}
+pending_reauth: Dict[int, Dict[str, str]] = {}
+pending_reauth_lock = threading.Lock()
+
+
+def _send_reauth_push(notifier: Optional[Notifier], account_name: str, account_id: int) -> None:
+    """Send a reauth push notification via the account's notification providers.
+
+    For ntfy UnifiedPush endpoints (?up=1), sends a JSON body with type and account_id.
+    For regular ntfy/other endpoints, sends a human-readable message.
+
+    Args:
+        notifier: The Notifier instance for this account, or None.
+        account_name: Display name of the account.
+        account_id: Database ID of the account.
+    """
+    if not notifier:
+        logging.warning(f"Cannot send reauth push for {account_name}: no notifier configured")
+        return
+
+    for provider in notifier.providers:
+        # Check if this is an ntfy provider with UP endpoints
+        if hasattr(provider, 'ntfy_data'):
+            for ntfy_url, token in provider.ntfy_data:
+                headers: dict = {}
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+
+                parsed = urlparse(ntfy_url)
+                params = parse_qs(parsed.query)
+                is_up = params.get('up', [''])[0] == '1'
+
+                if is_up:
+                    data = json.dumps({"type": "reauth", "account_id": account_id}).encode('utf-8')
+                else:
+                    headers["Title"] = "NotiMail Re-authentication Required"
+                    data = f"NotiMail needs re-authentication for account {account_name}".encode('utf-8')
+
+                try:
+                    response = requests.post(ntfy_url, data=data, headers=headers)
+                    if response.status_code == 200:
+                        logging.info(f"Sent reauth push for {account_name} to {ntfy_url}")
+                    else:
+                        logging.error(f"Failed to send reauth push to {ntfy_url}: {response.status_code}")
+                except requests.RequestException as e:
+                    logging.error(f"Error sending reauth push to {ntfy_url}: {e}")
+                time.sleep(2)
+        else:
+            # For non-ntfy providers, send as a regular notification
+            try:
+                provider.send_notification(
+                    "NotiMail Re-authentication",
+                    f"Re-authentication needed for account {account_name}")
+            except Exception as e:
+                logging.error(f"Error sending reauth notification: {e}")
 
 
 class EmailProcessor:
@@ -159,7 +221,7 @@ class IMAPHandler:
     Attributes:
         host: IMAP server hostname.
         email_user: IMAP login username / email address.
-        email_pass: IMAP login password.
+        email_pass: IMAP login password (None for memory-only mode when not provided).
         folder: Mailbox folder to monitor (default: "inbox").
         notifier: Notifier instance for dispatching push notifications.
         metrics: Dict of Prometheus metric objects (or DummyMetric stubs).
@@ -169,16 +231,23 @@ class IMAPHandler:
         retry_count: Number of consecutive failed connection attempts.
         healthy: False after an unrecoverable error; triggers reconnection.
         stop_event: Threading Event to signal this handler to shut down.
+        credential_mode: 0 = stored (default), 1 = memory-only.
+        needs_reauth: True when a memory-only handler needs client re-authentication.
+        account_id: Database ID of the email account (for reauth handoff).
+        account_name: Display name of the account (for logging/reauth pushes).
     """
 
     def __init__(
         self,
         host: str,
         email_user: str,
-        email_pass: str,
+        email_pass: Optional[str],
         folder: str = "inbox",
         notifier: Optional[Notifier] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        credential_mode: int = 0,
+        account_id: Optional[int] = None,
+        account_name: Optional[str] = None,
     ) -> None:
         self.host = host
         self.email_user = email_user
@@ -192,6 +261,10 @@ class IMAPHandler:
         self.retry_count: int = 0
         self.healthy: bool = True
         self.stop_event: threading.Event = threading.Event()
+        self.credential_mode: int = credential_mode
+        self.needs_reauth: bool = False
+        self.account_id: Optional[int] = account_id
+        self.account_name: Optional[str] = account_name
 
     def _count_active_connections(self, all_handlers: List["IMAPHandler"]) -> int:
         """Count how many handlers have active IMAP connections.
@@ -210,6 +283,9 @@ class IMAPHandler:
         If an existing connection is present, sends a NOOP to verify it
         is still alive. If the connection is stale or absent, creates a
         new IMAP4_SSL connection, logs in, and selects the folder.
+
+        For memory-only mode (credential_mode=1), after successful LOGIN
+        the password is immediately discarded from memory.
 
         On the first failure, a notification is sent to alert the user
         about the connection problem.
@@ -246,6 +322,16 @@ class IMAPHandler:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
 
+        # For memory-only mode, we need a password to connect
+        if self.credential_mode == 1 and not self.email_pass:
+            # No password available -- need reauth
+            if not self.needs_reauth:
+                self.needs_reauth = True
+                self.last_error = "Waiting for client re-authentication"
+                logging.info(f"[{self.email_user} - {self.folder}] Memory-only mode: waiting for reauth")
+                _send_reauth_push(self.notifier, self.account_name or self.email_user, self.account_id or 0)
+            return False
+
         # Establish a new connection
         try:
             logging.info(f"[{self.email_user} - {self.folder}] Connecting to IMAP server...")
@@ -253,9 +339,16 @@ class IMAPHandler:
             self.mail.login(self.email_user, self.email_pass)
             self.mail.select(self.folder)
             logging.info(f"[{self.email_user} - {self.folder}] Successfully connected to IMAP server")
+
+            # Memory-only mode: discard password immediately after successful LOGIN
+            if self.credential_mode == 1:
+                self.email_pass = None
+                logging.info(f"[{self.email_user} - {self.folder}] Memory-only mode: password discarded after LOGIN")
+
             self.last_error = None
             self.retry_count = 0
             self.healthy = True
+            self.needs_reauth = False
             if all_handlers:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
@@ -269,8 +362,16 @@ class IMAPHandler:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
             logging.error(f"[{self.email_user} - {self.folder}] Connection failed (attempt {self.retry_count}): {str(e)}")
+
+            # For memory-only mode, discard the password even on failure
+            # and switch to reauth mode
+            if self.credential_mode == 1:
+                self.email_pass = None
+                self.needs_reauth = True
+                _send_reauth_push(self.notifier, self.account_name or self.email_user, self.account_id or 0)
+
             # Notify on first failure only to avoid notification spam
-            if self.notifier and self.retry_count == 1:
+            if self.notifier and self.retry_count == 1 and self.credential_mode == 0:
                 try:
                     self.notifier.send_notification(
                         "Connection Error",
@@ -395,6 +496,25 @@ class IMAPHandler:
             self.healthy = False
             return False
 
+    def provide_reauth_credentials(self, email_user: str, email_pass: str, host: str) -> None:
+        """Provide credentials for re-authentication (memory-only mode).
+
+        Called by the reauth API endpoint to hand credentials to a
+        waiting handler. The credentials are stored temporarily and
+        will be discarded after the next successful LOGIN.
+
+        Args:
+            email_user: IMAP login username.
+            email_pass: IMAP login password.
+            host: IMAP server hostname.
+        """
+        self.email_user = email_user
+        self.email_pass = email_pass
+        self.host = host
+        self.needs_reauth = False
+        self.healthy = True
+        logging.info(f"[{self.email_user} - {self.folder}] Reauth credentials provided")
+
 
 class MultiIMAPHandler:
     """Orchestrates monitoring of multiple IMAP accounts concurrently.
@@ -432,7 +552,10 @@ class MultiIMAPHandler:
         self.handlers: List[IMAPHandler] = [
             IMAPHandler(
                 account['Host'], account['EmailUser'], account['EmailPass'],
-                account['Folder'], account['Notifier'], metrics=self.metrics
+                account['Folder'], account['Notifier'], metrics=self.metrics,
+                credential_mode=account.get('credential_mode', 0),
+                account_id=account.get('account_id'),
+                account_name=account.get('account_name'),
             )
             for account in accounts
         ]
@@ -500,7 +623,11 @@ class MultiIMAPHandler:
 
             handler = IMAPHandler(
                 acct['Host'], acct['EmailUser'], acct['EmailPass'],
-                acct['Folder'], acct['Notifier'], metrics=self.metrics)
+                acct['Folder'], acct['Notifier'], metrics=self.metrics,
+                credential_mode=acct.get('credential_mode', 0),
+                account_id=acct.get('account_id'),
+                account_name=acct.get('account_name'),
+            )
 
             with self.lock:
                 idx = len(self.handlers)
@@ -527,12 +654,30 @@ class MultiIMAPHandler:
             logging.info(f"Dynamic reload: stopping {handler.email_user} - {handler.folder}")
             # Don't remove from registry — thread will exit on its own
 
+    def get_handler_by_account_id(self, account_id: int) -> Optional[IMAPHandler]:
+        """Find a handler by its account_id.
+
+        Args:
+            account_id: The database ID of the email account.
+
+        Returns:
+            The matching IMAPHandler, or None if not found.
+        """
+        for handler in self.handlers:
+            if handler.account_id == account_id:
+                return handler
+        return None
+
     def monitor_account(self, handler: IMAPHandler) -> None:
         """Main loop for monitoring a single IMAP account.
 
         Repeatedly connects, enters IDLE, processes new emails, and
         handles errors with exponential backoff. Runs until the global
         shutdown flag is set or the handler's stop_event is triggered.
+
+        For memory-only accounts (credential_mode=1), if the connection
+        drops, the handler enters a waiting state and checks for pending
+        reauth credentials instead of retrying with stored credentials.
 
         Args:
             handler: The IMAPHandler instance to monitor.
@@ -541,8 +686,24 @@ class MultiIMAPHandler:
         backoff_time: int = RETRY_DELAY
 
         while not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
+            # Check for pending reauth credentials (memory-only mode)
+            if handler.needs_reauth and handler.account_id is not None:
+                with pending_reauth_lock:
+                    creds = pending_reauth.pop(handler.account_id, None)
+                if creds:
+                    handler.provide_reauth_credentials(
+                        creds['email_user'], creds['email_pass'], creds['host'])
+                else:
+                    # Still waiting -- sleep and check again
+                    time.sleep(5)
+                    continue
+
             try:
                 if not handler.connect(all_handlers=self.handlers):
+                    if handler.needs_reauth:
+                        # Memory-only mode: don't retry, wait for reauth
+                        continue
+
                     # Exponential backoff capped at 300 seconds (5 minutes)
                     retry_time: int = min(backoff_time * (handler.retry_count % 5), 300)
                     logging.info(f"[{handler.email_user} - {handler.folder}] Retrying connection in {retry_time} seconds")
@@ -599,6 +760,13 @@ class MultiIMAPHandler:
                 handler.mail = None
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     sum(1 for h in self.handlers if h.mail is not None))
+
+            # For memory-only mode, trigger reauth on connection loss
+            if handler.credential_mode == 1 and not handler.needs_reauth:
+                handler.email_pass = None
+                handler.needs_reauth = True
+                handler.last_error = "Connection lost. Waiting for client re-authentication."
+                _send_reauth_push(handler.notifier, handler.account_name or handler.email_user, handler.account_id or 0)
 
             # Brief pause before reconnection attempt
             if not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():

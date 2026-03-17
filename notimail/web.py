@@ -20,8 +20,9 @@ from notimail.auth import (
     check_password, hash_password, generate_api_key, validate_api_key,
     create_invite, redeem_invite, RateLimiter,
 )
-from notimail.crypto import CryptoManager, UserKeyCache
+from notimail.crypto import CryptoManager
 from notimail.database import DatabaseHandler
+from notimail.imap import pending_reauth, pending_reauth_lock
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +146,6 @@ def login():
     session.permanent = True
     db.update_user_last_login(user['id'])
 
-    # Cache per-user encryption key (derived from password + salt)
-    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
-    if user_key_cache and user.get('key_salt'):
-        salt_bytes = bytes.fromhex(user['key_salt'])
-        user_key_cache.store(user['id'], password, salt_bytes)
-
     logging.info(f"User logged in: {session['username']} (id={user['id']})")
     return redirect(url_for('web.dashboard'))
 
@@ -159,11 +154,6 @@ def login():
 def logout():
     """Clear the session and redirect to login."""
     username = session.get('username', 'unknown')
-    user_id = session.get('user_id')
-    # Remove cached per-user encryption key
-    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
-    if user_key_cache and user_id is not None:
-        user_key_cache.remove(user_id)
     session.clear()
     logging.info(f"User logged out: {username}")
     return redirect(url_for('web.login'))
@@ -194,13 +184,12 @@ def dashboard():
     total_users = db.count_users()
     total_accounts = db.count_email_accounts()
 
-    # Check for locked per-user-encrypted accounts
-    locked_accounts = 0
-    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
-    user_encrypted_count = db.count_user_encrypted_accounts(session['user_id'])
-    if user_encrypted_count > 0 and user_key_cache:
-        if user_key_cache.get(session['user_id']) is None:
-            locked_accounts = user_encrypted_count
+    # Check for memory-only accounts awaiting reauth
+    awaiting_reauth = 0
+    if multi_handler:
+        for handler in multi_handler.handlers:
+            if handler.needs_reauth and handler.credential_mode == 1:
+                awaiting_reauth += 1
 
     return render_template('dashboard.html',
                          username=session.get('username'),
@@ -210,7 +199,7 @@ def dashboard():
                          active_connections=active_connections,
                          total_users=total_users,
                          total_accounts=total_accounts,
-                         locked_accounts=locked_accounts)
+                         awaiting_reauth=awaiting_reauth)
 
 
 @web_bp.route('/register/<code>', methods=['GET', 'POST'])
@@ -270,33 +259,27 @@ def accounts_page():
     """Account management page."""
     db: DatabaseHandler = g.db
     crypto: CryptoManager = g.crypto
-    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
     raw_accounts = db.get_email_accounts_for_user(session['user_id'])
     accounts = []
     for acct in raw_accounts:
-        is_user_encrypted = bool(acct.get('user_encrypted'))
+        credential_mode = acct.get('credential_mode', 0)
         try:
-            if is_user_encrypted and user_key_cache:
-                uf = user_key_cache.get(session['user_id'])
-                if uf is None:
-                    raise ValueError("Per-user key not cached")
-                decrypt_fn = lambda ct, f=uf: f.decrypt(ct.encode('utf-8')).decode('utf-8')
-            else:
-                decrypt_fn = crypto.decrypt
+            email_user = crypto.decrypt(acct['email_user_encrypted'])
+            host = crypto.decrypt(acct['host_encrypted'])
             accounts.append({
                 'id': acct['id'],
                 'account_name': acct['account_name'],
-                'email_user': decrypt_fn(acct['email_user_encrypted']),
-                'host': decrypt_fn(acct['host_encrypted']),
+                'email_user': email_user,
+                'host': host,
                 'folders': acct['folders'],
                 'enabled': acct['enabled'],
-                'user_encrypted': is_user_encrypted,
+                'credential_mode': credential_mode,
             })
         except Exception:
             accounts.append({
                 'id': acct['id'], 'account_name': acct['account_name'],
                 'email_user': '(decrypt error)', 'host': '', 'folders': '',
-                'enabled': 0, 'user_encrypted': is_user_encrypted,
+                'enabled': 0, 'credential_mode': credential_mode,
             })
 
     host_status = g.host_limits.get_host_status() if g.host_limits else {}
@@ -353,68 +336,49 @@ def delete_account_web(account_id: int):
     return redirect(url_for('web.accounts_page'))
 
 
-@web_bp.route('/accounts/<int:account_id>/toggle-user-encryption', methods=['POST'])
+@web_bp.route('/accounts/<int:account_id>/toggle-credential-mode', methods=['POST'])
 @login_required
-def toggle_user_encryption(account_id: int):
-    """Toggle per-user encryption on/off for an email account.
+def toggle_credential_mode(account_id: int):
+    """Toggle credential mode between stored and memory-only.
 
-    When turning ON: re-encrypts credentials with the per-user Fernet key.
-    When turning OFF: re-encrypts credentials with the global Fernet key.
+    When switching TO memory-only: delete the stored password (set to empty string).
+    When switching FROM memory-only: require the user to re-enter the password.
     """
     db: DatabaseHandler = g.db
     crypto: CryptoManager = g.crypto
-    user_key_cache: Optional[UserKeyCache] = g.get('user_key_cache')
 
     acct = db.get_email_account_by_id(account_id)
     if not acct or acct['user_id'] != session['user_id']:
         flash('Account not found.', 'error')
         return redirect(url_for('web.accounts_page'))
 
-    if not user_key_cache:
-        flash('Per-user encryption is not available.', 'error')
-        return redirect(url_for('web.accounts_page'))
-
-    user_fernet = user_key_cache.get(session['user_id'])
-    if user_fernet is None:
-        flash('Your encryption key is not cached. Please log out and log back in.', 'error')
-        return redirect(url_for('web.accounts_page'))
-
-    currently_encrypted = bool(acct.get('user_encrypted'))
+    current_mode = acct.get('credential_mode', 0)
 
     try:
-        if currently_encrypted:
-            # Turning OFF: decrypt with per-user key, re-encrypt with global
-            old_decrypt = lambda ct: user_fernet.decrypt(ct.encode('utf-8')).decode('utf-8')
-            email_user = old_decrypt(acct['email_user_encrypted'])
-            email_pass = old_decrypt(acct['email_pass_encrypted'])
-            host = old_decrypt(acct['host_encrypted'])
+        if current_mode == 1:
+            # Switching FROM memory-only to stored: need password
+            new_pass = request.form.get('email_pass', '')
+            if not new_pass:
+                flash('Password is required to switch to stored mode.', 'error')
+                return redirect(url_for('web.accounts_page'))
 
             db.update_email_account(
                 account_id,
-                email_user_encrypted=crypto.encrypt(email_user),
-                email_pass_encrypted=crypto.encrypt(email_pass),
-                host_encrypted=crypto.encrypt(host),
-                user_encrypted=0,
+                email_pass_encrypted=crypto.encrypt(new_pass),
+                credential_mode=0,
             )
-            flash('Per-user encryption disabled. Credentials re-encrypted with global key.', 'success')
+            flash('Credential mode changed to Stored. Password encrypted and saved.', 'success')
         else:
-            # Turning ON: decrypt with global key, re-encrypt with per-user key
-            email_user = crypto.decrypt(acct['email_user_encrypted'])
-            email_pass = crypto.decrypt(acct['email_pass_encrypted'])
-            host = crypto.decrypt(acct['host_encrypted'])
-
-            new_encrypt = lambda pt: user_fernet.encrypt(pt.encode('utf-8')).decode('utf-8')
+            # Switching TO memory-only: delete the password
             db.update_email_account(
                 account_id,
-                email_user_encrypted=new_encrypt(email_user),
-                email_pass_encrypted=new_encrypt(email_pass),
-                host_encrypted=new_encrypt(host),
-                user_encrypted=1,
+                email_pass_encrypted='',
+                credential_mode=1,
             )
-            flash('Per-user encryption enabled. Credentials re-encrypted with your personal key.', 'success')
+            flash('Credential mode changed to Memory-Only. Password deleted from server.', 'success')
     except Exception as e:
-        logging.error(f"Failed to toggle per-user encryption for account {account_id}: {e}")
-        flash('Failed to toggle encryption. Credentials unchanged.', 'error')
+        logging.error(f"Failed to toggle credential mode for account {account_id}: {e}")
+        flash('Failed to change credential mode.', 'error')
 
     return redirect(url_for('web.accounts_page'))
 
@@ -678,6 +642,7 @@ def list_accounts():
                 'port': acct['port'],
                 'folders': acct['folders'],
                 'enabled': bool(acct['enabled']),
+                'credential_mode': acct.get('credential_mode', 0),
             })
         except Exception:
             result.append({
@@ -691,12 +656,19 @@ def list_accounts():
 @api_bp.route('/accounts', methods=['POST'])
 @api_key_required
 def create_account():
-    """Create a new email account with optional notification config."""
+    """Create a new email account with optional notification config.
+
+    Supports credential_mode: 0 (stored, default) or 1 (memory-only).
+    For memory-only accounts, email_pass is used for initial IMAP connection
+    but never stored on disk.
+    """
     db: DatabaseHandler = g.db
     crypto: CryptoManager = g.crypto
     data = request.get_json()
     if not data:
         return jsonify({'error': 'JSON body required'}), 400
+
+    credential_mode = data.get('credential_mode', 0)
 
     required = ['account_name', 'email_user', 'email_pass', 'host']
     for field in required:
@@ -708,15 +680,26 @@ def create_account():
     if g.host_limits:
         warning = g.host_limits.check_limit_warning(data['host'], 1)
 
+    # For memory-only mode, store email_user and host encrypted (for display)
+    # but password as empty string (never stored)
+    if credential_mode == 1:
+        email_pass_encrypted = ''
+    else:
+        email_pass_encrypted = crypto.encrypt(data['email_pass'])
+
     account_id = db.add_email_account(
         user_id=g.api_user_id,
         account_name=data['account_name'],
         email_user_encrypted=crypto.encrypt(data['email_user']),
-        email_pass_encrypted=crypto.encrypt(data['email_pass']),
+        email_pass_encrypted=email_pass_encrypted,
         host_encrypted=crypto.encrypt(data['host']),
         port=data.get('port', 993),
         folders=data.get('folders', 'inbox'),
     )
+
+    # Set credential_mode
+    if credential_mode == 1:
+        db.update_email_account(account_id, credential_mode=1)
 
     # Add notification configs if provided
     notifications = data.get('notifications', [])
@@ -730,7 +713,7 @@ def create_account():
                 config_encrypted=crypto.encrypt(json.dumps(notif_config)),
             )
 
-    result = {'id': account_id, 'status': 'created'}
+    result = {'id': account_id, 'status': 'created', 'credential_mode': credential_mode}
     if warning:
         result['warning'] = warning
     return jsonify(result), 201
@@ -753,6 +736,7 @@ def get_account(account_id: int):
         'port': acct['port'],
         'folders': acct['folders'],
         'enabled': bool(acct['enabled']),
+        'credential_mode': acct.get('credential_mode', 0),
     })
 
 
@@ -860,6 +844,54 @@ def delete_notification(account_id: int, config_id: int):
     return jsonify({'status': 'deleted'})
 
 
+@api_bp.route('/accounts/<int:account_id>/reauth', methods=['POST'])
+@api_key_required
+def reauth_account(account_id: int):
+    """Provide credentials for re-authentication of a memory-only account.
+
+    The client sends credentials after receiving a reauth push notification.
+    Credentials are handed to the waiting IMAP handler, used for LOGIN,
+    then immediately discarded from memory.
+    """
+    db: DatabaseHandler = g.db
+    acct = db.get_email_account_by_id(account_id)
+    if not acct or acct['user_id'] != g.api_user_id:
+        return jsonify({'error': 'Account not found'}), 404
+
+    if acct.get('credential_mode', 0) != 1:
+        return jsonify({'error': 'Account is not in memory-only mode'}), 400
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'JSON body required'}), 400
+
+    required = ['email_user', 'email_pass', 'host']
+    for field in required:
+        if not data.get(field):
+            return jsonify({'error': f'Missing required field: {field}'}), 400
+
+    # Try to hand credentials directly to the handler first
+    multi_handler = g.get('multi_handler')
+    if multi_handler:
+        # Find all handlers for this account (one per folder)
+        handlers_found = [h for h in multi_handler.handlers if h.account_id == account_id]
+        if handlers_found:
+            for handler in handlers_found:
+                handler.provide_reauth_credentials(
+                    data['email_user'], data['email_pass'], data['host'])
+            return jsonify({'status': 'credentials_provided', 'handlers': len(handlers_found)})
+
+    # Fallback: put credentials in the pending dict for the monitor loop to pick up
+    with pending_reauth_lock:
+        pending_reauth[account_id] = {
+            'email_user': data['email_user'],
+            'email_pass': data['email_pass'],
+            'host': data['host'],
+        }
+
+    return jsonify({'status': 'credentials_queued'})
+
+
 @api_bp.route('/keys', methods=['POST'])
 @api_key_required
 def create_key():
@@ -956,7 +988,6 @@ def create_app(
     rate_limiter: Optional[RateLimiter] = None,
     multi_handler: Any = None,
     host_limits: Any = None,
-    user_key_cache: Optional[UserKeyCache] = None,
 ) -> Flask:
     """Create and configure the Flask application.
 
@@ -967,7 +998,6 @@ def create_app(
         rate_limiter: Optional RateLimiter instance. Created with defaults if None.
         multi_handler: The MultiIMAPHandler instance (may be None at startup).
         host_limits: Optional HostLimitManager for connection limit warnings.
-        user_key_cache: Optional UserKeyCache for per-user encryption support.
 
     Returns:
         A configured Flask application.
@@ -1017,7 +1047,6 @@ def create_app(
         g.rate_limiter = rate_limiter
         g.multi_handler = multi_handler
         g.host_limits = host_limits
-        g.user_key_cache = user_key_cache
 
     # Register blueprints
     app.register_blueprint(web_bp)

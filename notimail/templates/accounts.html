@@ -47,7 +47,7 @@
             <th>Host</th>
             <th>Folders</th>
             <th>Enabled</th>
-            <th>Encryption</th>
+            <th>Credential Mode</th>
             <th>Actions</th>
         </tr>
         {% for acct in accounts %}
@@ -57,14 +57,15 @@
             <td>{{ acct.host }}</td>
             <td>{{ acct.folders }}</td>
             <td>{{ "Yes" if acct.enabled else "No" }}</td>
-            <td>{{ "Per-user" if acct.user_encrypted else "Global" }}</td>
+            <td>{{ "Memory-Only" if acct.credential_mode == 1 else "Stored" }}</td>
             <td>
-                <form method="POST" action="{{ url_for('web.toggle_user_encryption', account_id=acct.id) }}" style="display:inline;">
+                <form method="POST" action="{{ url_for('web.toggle_credential_mode', account_id=acct.id) }}" style="display:inline;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
-                    {% if acct.user_encrypted %}
-                    <button type="submit" class="btn" onclick="return confirm('Disable per-user encryption? Credentials will be re-encrypted with the global key.');">Disable Per-User</button>
+                    {% if acct.credential_mode == 1 %}
+                    <input type="password" name="email_pass" placeholder="Password required" style="width: 140px; display:inline-block; margin-right: 4px;">
+                    <button type="submit" class="btn" onclick="return confirm('Switch to Stored mode? The password will be encrypted and saved on the server.');">Switch to Stored</button>
                     {% else %}
-                    <button type="submit" class="btn" onclick="return confirm('Enable per-user encryption? The server admin will not be able to decrypt these credentials.');">Enable Per-User</button>
+                    <button type="submit" class="btn" onclick="return confirm('Switch to Memory-Only mode? The password will be permanently deleted from the server. If the IMAP connection drops, you must re-authenticate via your client.');">Switch to Memory-Only</button>
                     {% endif %}
                 </form>
                 <form method="POST" action="{{ url_for('web.delete_account_web', account_id=acct.id) }}" style="display:inline;">
@@ -78,15 +79,15 @@
 </div>
 
 <div class="card" style="margin-top: 16px; background: #f8f9fa; border-left: 4px solid #3498db; padding: 16px;">
-    <h4 style="margin-top: 0;">About Per-User Encryption</h4>
+    <h4 style="margin-top: 0;">About Memory-Only Mode</h4>
     <p style="margin-bottom: 0;">
-        <strong>Per-User Encryption:</strong> When enabled, your email credentials are encrypted with a key
-        derived from your password. The server admin cannot decrypt them.
+        <strong>Memory-Only Mode:</strong> Your email password is never stored on the server.
+        It is used once to connect, then immediately discarded from memory.
     </p>
     <p style="margin-top: 8px; margin-bottom: 0;">
-        <strong>Tradeoff:</strong> After a server restart, your accounts won't be monitored until you log in
-        to the web dashboard (which re-derives the encryption key). If you don't log in,
-        these accounts remain paused.
+        <strong>Tradeoff:</strong> If the IMAP connection drops or the server restarts, your mail
+        client will receive a push notification to re-authenticate. Monitoring
+        pauses until re-authentication completes.
     </p>
 </div>
 {% endif %}

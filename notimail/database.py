@@ -268,6 +268,10 @@ class DatabaseHandler:
             # Flag indicating whether an account's credentials use per-user encryption
             """ALTER TABLE email_accounts ADD COLUMN user_encrypted INTEGER NOT NULL DEFAULT 0""",
         ]),
+        (4, [
+            # credential_mode: 0 = "stored" (global Fernet), 1 = "memory_only" (password never stored)
+            """ALTER TABLE email_accounts ADD COLUMN credential_mode INTEGER NOT NULL DEFAULT 0""",
+        ]),
     ]
 
     def apply_migrations(self) -> None:
@@ -307,6 +311,15 @@ class DatabaseHandler:
             logging.info(f"Migration v{version} applied successfully.")
 
             # Post-migration hooks
+            if version == 4:
+                # Migrate user_encrypted=1 accounts to credential_mode=1
+                conn.execute(
+                    "UPDATE email_accounts SET credential_mode = 1 "
+                    "WHERE COALESCE(user_encrypted, 0) = 1"
+                )
+                conn.commit()
+                logging.info("Migrated user_encrypted accounts to credential_mode=1.")
+
             if version == 3:
                 # Backfill key_salt for existing users that don't have one
                 rows = conn.execute(
@@ -519,12 +532,12 @@ class DatabaseHandler:
         cursor = conn.execute("SELECT COUNT(*) FROM email_accounts")
         return cursor.fetchone()[0]
 
-    def count_user_encrypted_accounts(self, user_id: int) -> int:
-        """Return the number of per-user-encrypted accounts for a user."""
+    def count_memory_only_accounts(self, user_id: int) -> int:
+        """Return the number of memory-only credential mode accounts for a user."""
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT COUNT(*) FROM email_accounts "
-            "WHERE user_id = ? AND COALESCE(user_encrypted, 0) = 1",
+            "WHERE user_id = ? AND COALESCE(credential_mode, 0) = 1",
             (user_id,))
         return cursor.fetchone()[0]
 
@@ -683,7 +696,8 @@ class DatabaseHandler:
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
             "host_encrypted, port, folders, enabled, created_at, updated_at, "
-            "COALESCE(user_encrypted, 0) as user_encrypted "
+            "COALESCE(user_encrypted, 0) as user_encrypted, "
+            "COALESCE(credential_mode, 0) as credential_mode "
             "FROM email_accounts WHERE user_id = ?",
             (user_id,))
         return [self._row_to_account(r) for r in cursor.fetchall()]
@@ -694,7 +708,8 @@ class DatabaseHandler:
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
             "host_encrypted, port, folders, enabled, created_at, updated_at, "
-            "COALESCE(user_encrypted, 0) as user_encrypted "
+            "COALESCE(user_encrypted, 0) as user_encrypted, "
+            "COALESCE(credential_mode, 0) as credential_mode "
             "FROM email_accounts WHERE enabled = 1")
         return [self._row_to_account(r) for r in cursor.fetchall()]
 
@@ -704,7 +719,8 @@ class DatabaseHandler:
         cursor = conn.execute(
             "SELECT id, user_id, account_name, email_user_encrypted, email_pass_encrypted, "
             "host_encrypted, port, folders, enabled, created_at, updated_at, "
-            "COALESCE(user_encrypted, 0) as user_encrypted "
+            "COALESCE(user_encrypted, 0) as user_encrypted, "
+            "COALESCE(credential_mode, 0) as credential_mode "
             "FROM email_accounts WHERE id = ?",
             (account_id,))
         row = cursor.fetchone()
@@ -733,6 +749,7 @@ class DatabaseHandler:
             'host_encrypted': row[5], 'port': row[6], 'folders': row[7],
             'enabled': row[8], 'created_at': row[9], 'updated_at': row[10],
             'user_encrypted': row[11] if len(row) > 11 else 0,
+            'credential_mode': row[12] if len(row) > 12 else 0,
         }
 
     # ------------------------------------------------------------------

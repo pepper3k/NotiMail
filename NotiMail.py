@@ -130,17 +130,15 @@ def main():
     """Main entry point: initialize crypto, DB, migration, web app, and IMAP handlers."""
     global multi_handler
 
-    from notimail.crypto import CryptoManager, UserKeyCache
+    from notimail.crypto import CryptoManager
     from notimail.migrate import should_migrate, migrate_from_config
     from notimail.accounts import load_accounts_from_db
     from notimail.host_limits import HostLimitManager
     from notimail.web import create_app
+    from notimail.imap import _send_reauth_push
 
     # Initialize encryption
     crypto = CryptoManager(key_path)
-
-    # Per-user encryption key cache (shared across web + account loader)
-    user_key_cache = UserKeyCache()
 
     # Initialize database and run migrations
     db = DatabaseHandler(db_path)
@@ -168,8 +166,7 @@ def main():
             logging.warning("No admin user found for migration. Skipping config.ini import.")
 
     # Load accounts from database
-    accounts = load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'],
-                                     user_key_cache=user_key_cache)
+    accounts = load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
 
     # Also load any remaining config.ini accounts (backward compat during transition)
     config_accounts = _load_legacy_accounts()
@@ -198,16 +195,23 @@ def main():
 
     # account_loader is called by the watchdog every 60s to detect new/removed accounts
     def _account_loader():
-        return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'],
-                                     user_key_cache=user_key_cache)
+        return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
 
     multi_handler = MultiIMAPHandler(
         accounts, metrics=metrics, db_path=db_path, account_loader=_account_loader)
 
+    # Send reauth pushes for memory-only accounts on startup
+    for handler in multi_handler.handlers:
+        if handler.credential_mode == 1:
+            handler.needs_reauth = True
+            handler.last_error = "Server started. Waiting for client re-authentication."
+            logging.info(f"Memory-only account {handler.account_name or handler.email_user} waiting for client reauth")
+            _send_reauth_push(handler.notifier, handler.account_name or handler.email_user, handler.account_id or 0)
+
     if flask_host and flask_port_str:
         flask_port = int(flask_port_str)
         app = create_app(db, crypto, config, multi_handler=multi_handler,
-                         host_limits=host_limits, user_key_cache=user_key_cache)
+                         host_limits=host_limits)
         flask_thread = threading.Thread(
             target=lambda: app.run(host=flask_host, port=flask_port, use_reloader=False),
             name="flask",
