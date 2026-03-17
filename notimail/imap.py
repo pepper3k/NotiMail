@@ -235,6 +235,7 @@ class IMAPHandler:
         needs_reauth: True when a memory-only handler needs client re-authentication.
         account_id: Database ID of the email account (for reauth handoff).
         account_name: Display name of the account (for logging/reauth pushes).
+        reauth_failure_count: Number of consecutive failed auto-reauth attempts.
     """
 
     def __init__(
@@ -265,6 +266,7 @@ class IMAPHandler:
         self.needs_reauth: bool = False
         self.account_id: Optional[int] = account_id
         self.account_name: Optional[str] = account_name
+        self.reauth_failure_count: int = 0
 
     def _count_active_connections(self, all_handlers: List["IMAPHandler"]) -> int:
         """Count how many handlers have active IMAP connections.
@@ -349,6 +351,7 @@ class IMAPHandler:
             self.retry_count = 0
             self.healthy = True
             self.needs_reauth = False
+            self.reauth_failure_count = 0
             if all_handlers:
                 self.metrics.get('CONNECTIONS', _DummyMetric()).set(
                     self._count_active_connections(all_handlers))
@@ -544,11 +547,15 @@ class MultiIMAPHandler:
         metrics: Optional[Dict[str, Any]] = None,
         db_path: Optional[str] = None,
         account_loader: Optional[Any] = None,
+        db: Optional[DatabaseHandler] = None,
+        server_url: Optional[str] = None,
     ) -> None:
         self.accounts = accounts
         self.metrics: Dict[str, Any] = metrics or {}
         self.db_path: str = db_path or "processed_emails.db"
         self.account_loader = account_loader  # callable returning List[Dict] or None
+        self.db: Optional[DatabaseHandler] = db
+        self.server_url: Optional[str] = server_url
         self.handlers: List[IMAPHandler] = [
             IMAPHandler(
                 account['Host'], account['EmailUser'], account['EmailPass'],
@@ -668,6 +675,67 @@ class MultiIMAPHandler:
                 return handler
         return None
 
+    def _send_manual_reauth(self, handler: IMAPHandler) -> None:
+        """Generate a reauth token and send a manual reauth notification.
+
+        Called when auto-reauth has failed repeatedly (reauth_failure_count >= 3).
+        Creates a one-time token and sends a clickable notification link so the
+        user can re-enter credentials via the web interface.
+
+        Args:
+            handler: The IMAPHandler that needs manual re-authentication.
+        """
+        import secrets
+
+        if not self.db or not handler.account_id:
+            logging.warning(
+                f"[{handler.email_user}] Cannot send manual reauth: "
+                f"db={'yes' if self.db else 'no'}, account_id={handler.account_id}")
+            return
+
+        token = secrets.token_urlsafe(32)
+        expires_at = (
+            datetime.datetime.now() + datetime.timedelta(hours=24)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        self.db.add_reauth_token(handler.account_id, token, expires_at)
+
+        reauth_url = f"{self.server_url}/reauth/{token}" if self.server_url else f"/reauth/{token}"
+        logging.info(
+            f"[{handler.email_user}] Manual reauth token generated: {reauth_url}")
+
+        if handler.notifier:
+            for provider in handler.notifier.providers:
+                if hasattr(provider, 'ntfy_data'):
+                    for ntfy_url, ntfy_token in provider.ntfy_data:
+                        headers: dict = {}
+                        if ntfy_token:
+                            headers["Authorization"] = f"Bearer {ntfy_token}"
+                        headers["Title"] = "NotiMail: Manual Re-authentication Required"
+                        headers["Click"] = reauth_url
+                        data = (
+                            f"Auto re-authentication failed for "
+                            f"{handler.account_name or handler.email_user}. "
+                            f"Tap to re-authenticate."
+                        ).encode('utf-8')
+                        try:
+                            requests.post(ntfy_url, data=data, headers=headers)
+                            logging.info(
+                                f"Sent manual reauth notification for "
+                                f"{handler.email_user} to {ntfy_url}")
+                        except requests.RequestException as e:
+                            logging.error(
+                                f"Error sending manual reauth notification to "
+                                f"{ntfy_url}: {e}")
+                else:
+                    try:
+                        provider.send_notification(
+                            "NotiMail: Manual Re-authentication Required",
+                            f"Auto re-authentication failed for "
+                            f"{handler.account_name or handler.email_user}. "
+                            f"Use this link to re-authenticate: {reauth_url}")
+                    except Exception as e:
+                        logging.error(f"Error sending manual reauth notification: {e}")
+
     def monitor_account(self, handler: IMAPHandler) -> None:
         """Main loop for monitoring a single IMAP account.
 
@@ -686,6 +754,9 @@ class MultiIMAPHandler:
         backoff_time: int = RETRY_DELAY
 
         while not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
+            # Track whether this iteration is a reauth attempt
+            _was_reauth_attempt = False
+
             # Check for pending reauth credentials (memory-only mode)
             if handler.needs_reauth and handler.account_id is not None:
                 with pending_reauth_lock:
@@ -693,6 +764,7 @@ class MultiIMAPHandler:
                 if creds:
                     handler.provide_reauth_credentials(
                         creds['email_user'], creds['email_pass'], creds['host'])
+                    _was_reauth_attempt = True
                 else:
                     # Still waiting -- sleep and check again
                     time.sleep(5)
@@ -700,6 +772,18 @@ class MultiIMAPHandler:
 
             try:
                 if not handler.connect(all_handlers=self.handlers):
+                    # If this was a reauth attempt and login failed,
+                    # increment the failure counter for auto->manual fallback
+                    if _was_reauth_attempt and handler.needs_reauth:
+                        handler.reauth_failure_count += 1
+                        logging.warning(
+                            f"[{handler.email_user}] Reauth attempt failed "
+                            f"(count={handler.reauth_failure_count})")
+                        if handler.reauth_failure_count >= 3:
+                            handler.last_error = (
+                                "Auto re-authentication failed. Manual reauth link sent.")
+                            self._send_manual_reauth(handler)
+
                     if handler.needs_reauth:
                         # Memory-only mode: don't retry, wait for reauth
                         continue
@@ -765,8 +849,14 @@ class MultiIMAPHandler:
             if handler.credential_mode == 1 and not handler.needs_reauth:
                 handler.email_pass = None
                 handler.needs_reauth = True
-                handler.last_error = "Connection lost. Waiting for client re-authentication."
-                _send_reauth_push(handler.notifier, handler.account_name or handler.email_user, handler.account_id or 0)
+
+                if handler.reauth_failure_count >= 3:
+                    # Auto-reauth has failed repeatedly -- switch to manual
+                    handler.last_error = "Auto re-authentication failed. Manual reauth link sent."
+                    self._send_manual_reauth(handler)
+                else:
+                    handler.last_error = "Connection lost. Waiting for client re-authentication."
+                    _send_reauth_push(handler.notifier, handler.account_name or handler.email_user, handler.account_id or 0)
 
             # Brief pause before reconnection attempt
             if not notimail_config.shutdown_in_progress and not handler.stop_event.is_set():
@@ -792,6 +882,15 @@ def connection_watchdog(multi_handler: MultiIMAPHandler) -> None:
 
         # Reload accounts from DB (picks up new/changed/disabled accounts)
         multi_handler.reload_accounts()
+
+        # Cleanup expired reauth tokens
+        if multi_handler.db:
+            try:
+                cleaned = multi_handler.db.cleanup_expired_reauth_tokens()
+                if cleaned > 0:
+                    logging.info(f"Cleaned up {cleaned} expired/used reauth token(s)")
+            except Exception as e:
+                logging.error(f"Error cleaning up reauth tokens: {e}")
 
         for i, thread in enumerate(multi_handler.threads):
             if not thread.is_alive() and not notimail_config.shutdown_in_progress:

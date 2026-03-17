@@ -272,6 +272,17 @@ class DatabaseHandler:
             # credential_mode: 0 = "stored" (global Fernet), 1 = "memory_only" (password never stored)
             """ALTER TABLE email_accounts ADD COLUMN credential_mode INTEGER NOT NULL DEFAULT 0""",
         ]),
+        (5, [
+            # One-time reauth tokens for manual credential re-entry (memory-only mode)
+            """CREATE TABLE IF NOT EXISTS reauth_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_account_id INTEGER NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
+                token TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
+            )""",
+        ]),
     ]
 
     def apply_migrations(self) -> None:
@@ -525,6 +536,59 @@ class DatabaseHandler:
             "UPDATE password_reset_tokens SET used = 1 WHERE id = ?",
             (token_id,))
         conn.commit()
+
+    # ------------------------------------------------------------------
+    # Reauth token operations (memory-only credential mode)
+    # ------------------------------------------------------------------
+
+    def add_reauth_token(
+        self,
+        email_account_id: int,
+        token: str,
+        expires_at: str,
+    ) -> int:
+        """Create a reauth token for manual credential re-entry. Returns the token ID."""
+        conn = self._get_conn()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = conn.execute(
+            "INSERT INTO reauth_tokens (email_account_id, token, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (email_account_id, token, now, expires_at))
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_reauth_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """Look up a reauth token."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT id, email_account_id, token, created_at, expires_at, used "
+            "FROM reauth_tokens WHERE token = ?",
+            (token,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            'id': row[0], 'email_account_id': row[1], 'token': row[2],
+            'created_at': row[3], 'expires_at': row[4], 'used': row[5],
+        }
+
+    def mark_reauth_token_used(self, token_id: int) -> None:
+        """Mark a reauth token as used."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE reauth_tokens SET used = 1 WHERE id = ?",
+            (token_id,))
+        conn.commit()
+
+    def cleanup_expired_reauth_tokens(self) -> int:
+        """Delete expired or used reauth tokens. Returns the number deleted."""
+        conn = self._get_conn()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = conn.execute(
+            "DELETE FROM reauth_tokens WHERE used = 1 OR expires_at < ?",
+            (now,))
+        conn.commit()
+        return cursor.rowcount
 
     def count_email_accounts(self) -> int:
         """Return the total number of email accounts."""

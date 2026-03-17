@@ -197,8 +197,13 @@ def main():
     def _account_loader():
         return load_accounts_from_db(db, crypto, errors_metric=metrics['ERRORS'])
 
+    flask_host_val = config.get('GENERAL', 'FlaskHost', fallback='0.0.0.0')
+    flask_port_val = config.get('GENERAL', 'FlaskPort', fallback='8080')
+    server_url = f"http://{flask_host_val}:{flask_port_val}"
+
     multi_handler = MultiIMAPHandler(
-        accounts, metrics=metrics, db_path=db_path, account_loader=_account_loader)
+        accounts, metrics=metrics, db_path=db_path, account_loader=_account_loader,
+        db=db, server_url=server_url)
 
     # Send reauth pushes for memory-only accounts on startup
     for handler in multi_handler.handlers:

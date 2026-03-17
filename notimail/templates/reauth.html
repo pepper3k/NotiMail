@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Re-authenticate - NotiMail{% endblock %}
+{% block content %}
+<div style="max-width: 400px; margin: 80px auto;">
+    <div class="card">
+        <h2 style="margin-bottom: 20px;">Re-authenticate Account</h2>
+        {% if not valid %}
+            <p>This re-authentication link is invalid, expired, or has already been used.</p>
+        {% elif success %}
+            <p style="color: #27ae60;">Re-authentication successful! Your account is now being monitored again.</p>
+        {% else %}
+            <p>Account: <strong>{{ email_user }}</strong></p>
+            <p style="margin-bottom: 16px;">Host: <strong>{{ host }}</strong></p>
+            {% if error %}
+            <div class="flash error">{{ error }}</div>
+            {% endif %}
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                <label for="email_pass">IMAP Password</label>
+                <input type="password" id="email_pass" name="email_pass" required autofocus>
+                <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 8px;">Re-authenticate</button>
+            </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

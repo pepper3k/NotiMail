@@ -583,6 +583,70 @@ def reset_password_token(token: str):
     return redirect(url_for('web.login'))
 
 
+@web_bp.route('/reauth/<token>', methods=['GET', 'POST'])
+def reauth_page(token: str):
+    """One-time reauth page for manual credential re-entry (memory-only mode).
+
+    No login required -- the token IS the authentication.
+    """
+    import datetime
+    db: DatabaseHandler = g.db
+    crypto: CryptoManager = g.crypto
+
+    token_record = db.get_reauth_token(token)
+    if not token_record or token_record['used']:
+        return render_template('reauth.html', valid=False), 400
+
+    expires = datetime.datetime.strptime(token_record['expires_at'], "%Y-%m-%d %H:%M:%S")
+    if datetime.datetime.now() > expires:
+        return render_template('reauth.html', valid=False), 400
+
+    acct = db.get_email_account_by_id(token_record['email_account_id'])
+    if not acct:
+        return render_template('reauth.html', valid=False), 400
+
+    try:
+        email_user = crypto.decrypt(acct['email_user_encrypted'])
+        host = crypto.decrypt(acct['host_encrypted'])
+    except Exception:
+        email_user = '(decrypt error)'
+        host = ''
+
+    if request.method == 'GET':
+        return render_template('reauth.html', valid=True, email_user=email_user, host=host)
+
+    # POST -- validate and provide credentials
+    email_pass = request.form.get('email_pass', '')
+    if not email_pass:
+        return render_template('reauth.html', valid=True, email_user=email_user,
+                             host=host, error='Password is required.')
+
+    # Try to find the handler and provide credentials directly
+    multi_handler = g.get('multi_handler')
+    handlers_found = []
+    if multi_handler:
+        handlers_found = [
+            h for h in multi_handler.handlers
+            if h.account_id == token_record['email_account_id']
+        ]
+        for handler in handlers_found:
+            handler.provide_reauth_credentials(email_user, email_pass, host)
+            handler.reauth_failure_count = 0
+
+    if not handlers_found:
+        # Fallback: put credentials in the pending dict
+        with pending_reauth_lock:
+            pending_reauth[token_record['email_account_id']] = {
+                'email_user': email_user,
+                'email_pass': email_pass,
+                'host': host,
+            }
+
+    db.mark_reauth_token_used(token_record['id'])
+    return render_template('reauth.html', valid=True, success=True,
+                         email_user=email_user, host=host)
+
+
 @web_bp.route('/change-password', methods=['GET', 'POST'])
 @login_required
 def change_password():
