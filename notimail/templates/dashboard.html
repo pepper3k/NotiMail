@@ -4,6 +4,29 @@
 <h1 style="margin: 20px 0;">Dashboard</h1>
 <p style="margin-bottom: 20px;">Welcome, <strong>{{ username }}</strong>.</p>
 
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
+    <div class="card" style="text-align: center;">
+        <h3 style="font-size: 2em; color: #3498db;">{{ total_users }}</h3>
+        <p>Total Users</p>
+    </div>
+    <div class="card" style="text-align: center;">
+        <h3 style="font-size: 2em; color: #27ae60;">{{ total_accounts }}</h3>
+        <p>Email Accounts</p>
+    </div>
+    <div class="card" style="text-align: center;">
+        <h3 style="font-size: 2em; color: #e67e22;">{{ active_connections }}</h3>
+        <p>Active IMAP Connections</p>
+    </div>
+    <div class="card" style="text-align: center;">
+        <h3 style="font-size: 2em; color: #8e44ad;">{{ ram_mb }} MB</h3>
+        <p>Peak RAM Usage</p>
+    </div>
+    <div class="card" style="text-align: center;">
+        <h3 style="font-size: 1.5em; color: #2c3e50;">{{ cpu_user }}s / {{ cpu_system }}s</h3>
+        <p>CPU Time (user / system)</p>
+    </div>
+</div>
+
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
     <a href="{{ url_for('web.accounts_page') }}" class="card" style="text-decoration: none; color: inherit;">
         <h3>Accounts</h3>
@@ -16,6 +39,10 @@
     <a href="{{ url_for('web.invites_page') }}" class="card" style="text-decoration: none; color: inherit;">
         <h3>Invites</h3>
         <p>Create invite codes for new users.</p>
+    </a>
+    <a href="{{ url_for('web.change_password') }}" class="card" style="text-decoration: none; color: inherit;">
+        <h3>Change Password</h3>
+        <p>Update your account password.</p>
     </a>
     {% if session.get('role') == 'admin' %}
     <a href="{{ url_for('web.admin_page') }}" class="card" style="text-decoration: none; color: inherit;">
