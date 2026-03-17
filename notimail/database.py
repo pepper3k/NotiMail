@@ -240,6 +240,28 @@ class DatabaseHandler:
                 updated_at TEXT
             )""",
         ]),
+        (2, [
+            # Audit log for admin actions
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL REFERENCES users(id),
+                action TEXT NOT NULL,
+                target_user_id INTEGER REFERENCES users(id),
+                details TEXT,
+                timestamp TEXT NOT NULL
+            )""",
+            # Add enabled column to users (default 1 = enabled)
+            """ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1""",
+            # Password reset tokens
+            """CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                token TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
+            )""",
+        ]),
     ]
 
     def apply_migrations(self) -> None:
@@ -322,8 +344,8 @@ class DatabaseHandler:
         """
         conn = self._get_conn()
         cursor = conn.execute(
-            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login "
-            "FROM users WHERE username_lookup = ?",
+            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
+            "COALESCE(enabled, 1) as enabled FROM users WHERE username_lookup = ?",
             (username_lookup,))
         row = cursor.fetchone()
         if row is None:
@@ -331,15 +353,15 @@ class DatabaseHandler:
         return {
             'id': row[0], 'username': row[1], 'username_lookup': row[2],
             'password_hash': row[3], 'role': row[4], 'invited_by': row[5],
-            'created_at': row[6], 'last_login': row[7],
+            'created_at': row[6], 'last_login': row[7], 'enabled': row[8],
         }
 
     def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a user by their ID."""
         conn = self._get_conn()
         cursor = conn.execute(
-            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login "
-            "FROM users WHERE id = ?",
+            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
+            "COALESCE(enabled, 1) as enabled FROM users WHERE id = ?",
             (user_id,))
         row = cursor.fetchone()
         if row is None:
@@ -347,19 +369,19 @@ class DatabaseHandler:
         return {
             'id': row[0], 'username': row[1], 'username_lookup': row[2],
             'password_hash': row[3], 'role': row[4], 'invited_by': row[5],
-            'created_at': row[6], 'last_login': row[7],
+            'created_at': row[6], 'last_login': row[7], 'enabled': row[8],
         }
 
     def get_all_users(self) -> List[Dict[str, Any]]:
         """Return all users."""
         conn = self._get_conn()
         cursor = conn.execute(
-            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login "
-            "FROM users")
+            "SELECT id, username, username_lookup, password_hash, role, invited_by, created_at, last_login, "
+            "COALESCE(enabled, 1) as enabled FROM users")
         return [
             {'id': r[0], 'username': r[1], 'username_lookup': r[2],
              'password_hash': r[3], 'role': r[4], 'invited_by': r[5],
-             'created_at': r[6], 'last_login': r[7]}
+             'created_at': r[6], 'last_login': r[7], 'enabled': r[8]}
             for r in cursor.fetchall()
         ]
 
@@ -380,6 +402,93 @@ class DatabaseHandler:
         """Return the total number of users."""
         conn = self._get_conn()
         cursor = conn.execute("SELECT COUNT(*) FROM users")
+        return cursor.fetchone()[0]
+
+    def disable_user(self, user_id: int) -> None:
+        """Disable a user account (prevent login)."""
+        conn = self._get_conn()
+        conn.execute("UPDATE users SET enabled = 0 WHERE id = ?", (user_id,))
+        conn.commit()
+
+    def enable_user(self, user_id: int) -> None:
+        """Enable a user account."""
+        conn = self._get_conn()
+        conn.execute("UPDATE users SET enabled = 1 WHERE id = ?", (user_id,))
+        conn.commit()
+
+    def delete_user(self, user_id: int) -> None:
+        """Delete a user and their associated data (email accounts cascade)."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+
+    # ------------------------------------------------------------------
+    # Audit log operations
+    # ------------------------------------------------------------------
+
+    def log_admin_action(
+        self,
+        admin_user_id: int,
+        action: str,
+        target_user_id: Optional[int] = None,
+        details: Optional[str] = None,
+    ) -> None:
+        """Record an admin action in the audit log."""
+        conn = self._get_conn()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO audit_log (admin_user_id, action, target_user_id, details, timestamp) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (admin_user_id, action, target_user_id, details, now))
+        conn.commit()
+
+    # ------------------------------------------------------------------
+    # Password reset token operations
+    # ------------------------------------------------------------------
+
+    def add_password_reset_token(
+        self,
+        user_id: int,
+        token: str,
+        expires_at: str,
+    ) -> int:
+        """Create a password reset token. Returns the token ID."""
+        conn = self._get_conn()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = conn.execute(
+            "INSERT INTO password_reset_tokens (user_id, token, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, token, now, expires_at))
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_password_reset_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """Look up a password reset token."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT id, user_id, token, created_at, expires_at, used "
+            "FROM password_reset_tokens WHERE token = ?",
+            (token,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            'id': row[0], 'user_id': row[1], 'token': row[2],
+            'created_at': row[3], 'expires_at': row[4], 'used': row[5],
+        }
+
+    def mark_reset_token_used(self, token_id: int) -> None:
+        """Mark a password reset token as used."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE password_reset_tokens SET used = 1 WHERE id = ?",
+            (token_id,))
+        conn.commit()
+
+    def count_email_accounts(self) -> int:
+        """Return the total number of email accounts."""
+        conn = self._get_conn()
+        cursor = conn.execute("SELECT COUNT(*) FROM email_accounts")
         return cursor.fetchone()[0]
 
     # ------------------------------------------------------------------
