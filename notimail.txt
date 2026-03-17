@@ -1,0 +1,14 @@
+
+ ▐▛███▜▌   Claude Code v2.1.71
+▝▜█████▛▘  Opus 4.6 (1M context) · API Usage Billing
+  ▘▘ ▝▝    ~/NotiMail
+
+✻ Conversation compacted (ctrl+o for history)
+
+
+❯ /compact                                                                      
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Read requirements.txt (2 lines)
+  ⎿  Read requirements-all.txt (5 lines)
+  ⎿  Referenced file NotiMail.py
+  ⎿  Plan file referenced (~/.claude/plans/fuzzy-questing-metcalfe.md)
