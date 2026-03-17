@@ -132,6 +132,11 @@ def login():
         flash('Invalid credentials.', 'error')
         return render_template('login.html'), 401
 
+    # Check if user is enabled
+    if not user.get('enabled', 1):
+        flash('Your account has been disabled. Contact an administrator.', 'error')
+        return render_template('login.html'), 403
+
     # Success
     rate_limiter.record_success(ip, username_hmac)
     session['user_id'] = user['id']
@@ -156,8 +161,36 @@ def logout():
 @web_bp.route('/')
 @login_required
 def dashboard():
-    """Main dashboard page."""
-    return render_template('dashboard.html', username=session.get('username'))
+    """Main dashboard page with system metrics."""
+    import resource
+    db: DatabaseHandler = g.db
+
+    # Process resource usage
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    ram_mb = usage.ru_maxrss / 1024  # ru_maxrss is in KB on Linux
+    cpu_user = usage.ru_utime
+    cpu_system = usage.ru_stime
+
+    # Active IMAP connections
+    active_connections = 0
+    multi_handler = g.get('multi_handler')
+    if multi_handler:
+        for handler in multi_handler.handlers:
+            if handler.mail is not None:
+                active_connections += 1
+
+    # Counts
+    total_users = db.count_users()
+    total_accounts = db.count_email_accounts()
+
+    return render_template('dashboard.html',
+                         username=session.get('username'),
+                         ram_mb=round(ram_mb, 1),
+                         cpu_user=round(cpu_user, 2),
+                         cpu_system=round(cpu_system, 2),
+                         active_connections=active_connections,
+                         total_users=total_users,
+                         total_accounts=total_accounts)
 
 
 @web_bp.route('/register/<code>', methods=['GET', 'POST'])
@@ -356,6 +389,7 @@ def admin_page():
         users.append({
             'id': u['id'], 'username': username, 'role': u['role'],
             'created_at': u['created_at'], 'last_login': u['last_login'],
+            'enabled': u.get('enabled', 1),
         })
 
     all_status = []
@@ -370,28 +404,154 @@ def admin_page():
                 'last_error': handler.last_error,
             })
 
+    db.log_admin_action(session['user_id'], 'view_users')
+
     return render_template('admin.html', users=users, all_status=all_status,
                          current_user_id=session['user_id'])
 
 
-@web_bp.route('/admin/users/<int:user_id>/reset-password', methods=['POST'])
+@web_bp.route('/admin/users/<int:user_id>/disable', methods=['POST'])
 @admin_required
-def reset_password_web(user_id: int):
-    """Reset a user's password (admin only)."""
+def disable_user_web(user_id: int):
+    """Disable a user account (admin only)."""
     db: DatabaseHandler = g.db
-    new_password = request.form.get('new_password', '')
-    if len(new_password) < 8:
-        flash('Password must be at least 8 characters.', 'error')
+    if user_id == session['user_id']:
+        flash('You cannot disable your own account.', 'error')
         return redirect(url_for('web.admin_page'))
+    user = db.get_user_by_id(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('web.admin_page'))
+    db.disable_user(user_id)
+    db.log_admin_action(session['user_id'], 'disable_user', target_user_id=user_id)
+    flash(f'User ID {user_id} has been disabled.', 'success')
+    return redirect(url_for('web.admin_page'))
 
+
+@web_bp.route('/admin/users/<int:user_id>/enable', methods=['POST'])
+@admin_required
+def enable_user_web(user_id: int):
+    """Enable a user account (admin only)."""
+    db: DatabaseHandler = g.db
+    user = db.get_user_by_id(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('web.admin_page'))
+    db.enable_user(user_id)
+    db.log_admin_action(session['user_id'], 'enable_user', target_user_id=user_id)
+    flash(f'User ID {user_id} has been enabled.', 'success')
+    return redirect(url_for('web.admin_page'))
+
+
+@web_bp.route('/admin/users/<int:user_id>/delete', methods=['POST'])
+@admin_required
+def delete_user_web(user_id: int):
+    """Delete a user account (admin only)."""
+    db: DatabaseHandler = g.db
+    if user_id == session['user_id']:
+        flash('You cannot delete your own account.', 'error')
+        return redirect(url_for('web.admin_page'))
+    user = db.get_user_by_id(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('web.admin_page'))
+    db.delete_user(user_id)
+    db.log_admin_action(session['user_id'], 'delete_user', target_user_id=user_id,
+                       details=f'Deleted user ID {user_id}')
+    flash(f'User ID {user_id} has been deleted.', 'success')
+    return redirect(url_for('web.admin_page'))
+
+
+@web_bp.route('/admin/users/<int:user_id>/generate-reset-link', methods=['POST'])
+@admin_required
+def generate_reset_link_web(user_id: int):
+    """Generate a one-time password reset link for a user (admin only)."""
+    import datetime
+    import secrets as _secrets
+    db: DatabaseHandler = g.db
     user = db.get_user_by_id(user_id)
     if not user:
         flash('User not found.', 'error')
         return redirect(url_for('web.admin_page'))
 
-    db.update_user_password(user_id, hash_password(new_password))
-    flash(f'Password reset for user ID {user_id}.', 'success')
+    token = _secrets.token_urlsafe(32)
+    expires_at = (datetime.datetime.now() + datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    db.add_password_reset_token(user_id, token, expires_at)
+    db.log_admin_action(session['user_id'], 'generate_reset_link', target_user_id=user_id)
+
+    reset_url = url_for('web.reset_password_token', token=token, _external=True)
+    session['last_reset_link'] = reset_url
+    flash(f'Reset link generated for user ID {user_id}. Copy it below.', 'success')
     return redirect(url_for('web.admin_page'))
+
+
+@web_bp.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password_token(token: str):
+    """Password reset via one-time token link."""
+    import datetime
+    db: DatabaseHandler = g.db
+
+    token_record = db.get_password_reset_token(token)
+    if not token_record or token_record['used']:
+        flash('Invalid or already used reset link.', 'error')
+        return render_template('reset_password.html', valid=False), 400
+
+    expires = datetime.datetime.strptime(token_record['expires_at'], "%Y-%m-%d %H:%M:%S")
+    if datetime.datetime.now() > expires:
+        flash('This reset link has expired.', 'error')
+        return render_template('reset_password.html', valid=False), 400
+
+    if request.method == 'GET':
+        return render_template('reset_password.html', valid=True, token=token)
+
+    # POST - set new password
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    if len(new_password) < 8:
+        flash('Password must be at least 8 characters.', 'error')
+        return render_template('reset_password.html', valid=True, token=token)
+    if new_password != confirm_password:
+        flash('Passwords do not match.', 'error')
+        return render_template('reset_password.html', valid=True, token=token)
+
+    db.update_user_password(token_record['user_id'], hash_password(new_password))
+    db.mark_reset_token_used(token_record['id'])
+    flash('Password has been reset successfully. Please log in.', 'success')
+    return redirect(url_for('web.login'))
+
+
+@web_bp.route('/change-password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    """Self-service password change for logged-in users."""
+    db: DatabaseHandler = g.db
+
+    if request.method == 'GET':
+        return render_template('change_password.html')
+
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+
+    user = db.get_user_by_id(session['user_id'])
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('web.dashboard'))
+
+    if not check_password(current_password, user['password_hash']):
+        flash('Current password is incorrect.', 'error')
+        return render_template('change_password.html')
+
+    if len(new_password) < 8:
+        flash('New password must be at least 8 characters.', 'error')
+        return render_template('change_password.html')
+    if new_password != confirm_password:
+        flash('New passwords do not match.', 'error')
+        return render_template('change_password.html')
+
+    db.update_user_password(session['user_id'], hash_password(new_password))
+    flash('Password changed successfully.', 'success')
+    return redirect(url_for('web.dashboard'))
 
 
 # ---------------------------------------------------------------------------

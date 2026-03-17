@@ -3,23 +3,52 @@
 {% block content %}
 <h1 style="margin: 20px 0;">Admin Panel</h1>
 
+{% if session.get('last_reset_link') %}
+<div class="card" style="background: #fff3cd; border: 1px solid #ffeeba;">
+    <h3>Password Reset Link</h3>
+    <p style="margin-top: 8px;">Copy this link and send it to the user. It expires in 24 hours and can only be used once.</p>
+    <input type="text" value="{{ session.pop('last_reset_link') }}" readonly onclick="this.select();" style="margin-top: 8px; font-family: monospace;">
+</div>
+{% endif %}
+
 <div class="card">
     <h3>Users</h3>
     <table style="margin-top: 12px;">
-        <tr><th>ID</th><th>Username</th><th>Role</th><th>Created</th><th>Last Login</th><th>Actions</th></tr>
+        <tr><th>ID</th><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Last Login</th><th>Actions</th></tr>
         {% for user in users %}
         <tr>
             <td>{{ user.id }}</td>
             <td>{{ user.username }}</td>
             <td>{{ user.role }}</td>
+            <td>
+                {% if user.enabled %}
+                <span style="color: #27ae60;">Enabled</span>
+                {% else %}
+                <span style="color: #e74c3c;">Disabled</span>
+                {% endif %}
+            </td>
             <td>{{ user.created_at }}</td>
             <td>{{ user.last_login or "never" }}</td>
             <td>
                 {% if user.id != current_user_id %}
-                <form method="POST" action="{{ url_for('web.reset_password_web', user_id=user.id) }}" style="display:inline;">
+                <form method="POST" action="{{ url_for('web.generate_reset_link_web', user_id=user.id) }}" style="display:inline;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
-                    <input type="password" name="new_password" placeholder="New password" required style="width: 150px; margin-bottom: 0;">
-                    <button type="submit" class="btn btn-primary">Reset Password</button>
+                    <button type="submit" class="btn btn-primary">Reset Link</button>
+                </form>
+                {% if user.enabled %}
+                <form method="POST" action="{{ url_for('web.disable_user_web', user_id=user.id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                    <button type="submit" class="btn btn-danger">Disable</button>
+                </form>
+                {% else %}
+                <form method="POST" action="{{ url_for('web.enable_user_web', user_id=user.id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                    <button type="submit" class="btn btn-primary">Enable</button>
+                </form>
+                {% endif %}
+                <form method="POST" action="{{ url_for('web.delete_user_web', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this user? This cannot be undone.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
+                    <button type="submit" class="btn btn-danger">Delete</button>
                 </form>
                 {% else %}
                 <span style="color: #999;">(you)</span>
