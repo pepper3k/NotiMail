@@ -1,3 +1,5 @@
+# My fork of the wonderful NotiMail by @draga79
+
 # NotiMail 📧
 
 **Version 2.0 is here!**
