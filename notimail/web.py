@@ -518,10 +518,14 @@ def delete_user_web(user_id: int):
     if not user:
         flash('User not found.', 'error')
         return redirect(url_for('web.admin_page'))
-    db.delete_user(user_id)
-    db.log_admin_action(session['user_id'], 'delete_user', target_user_id=user_id,
-                       details=f'Deleted user ID {user_id}')
-    flash(f'User ID {user_id} has been deleted.', 'success')
+    try:
+        db.delete_user(user_id)
+        db.log_admin_action(session['user_id'], 'delete_user', target_user_id=user_id,
+                           details=f'Deleted user ID {user_id}')
+        flash(f'User ID {user_id} has been deleted.', 'success')
+    except Exception as e:
+        logging.error(f"Failed to delete user {user_id}: {e}")
+        flash(f'Failed to delete user: {e}', 'error')
     return redirect(url_for('web.admin_page'))
 
 

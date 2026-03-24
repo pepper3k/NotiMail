@@ -53,7 +53,7 @@ class DatabaseHandler:
             A sqlite3.Connection bound to the current thread.
         """
         if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn = sqlite3.connect(self.db_path, timeout=10)
             # WAL mode allows concurrent readers while one writer is active
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA foreign_keys=ON")
@@ -469,8 +469,22 @@ class DatabaseHandler:
         conn.commit()
 
     def delete_user(self, user_id: int) -> None:
-        """Delete a user and their associated data (email accounts cascade)."""
+        """Delete a user and all their associated data.
+
+        Manually deletes related records in tables that don't have
+        ON DELETE CASCADE before deleting the user row itself.
+        """
         conn = self._get_conn()
+        # Tables referencing users without CASCADE
+        conn.execute("DELETE FROM audit_log WHERE admin_user_id = ? OR target_user_id = ?", (user_id, user_id))
+        conn.execute("DELETE FROM invites WHERE created_by = ?", (user_id,))
+        conn.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "DELETE FROM reauth_tokens WHERE email_account_id IN "
+            "(SELECT id FROM email_accounts WHERE user_id = ?)", (user_id,))
+        # Tables with CASCADE (explicit for safety)
+        conn.execute("DELETE FROM email_accounts WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM api_keys WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
 
