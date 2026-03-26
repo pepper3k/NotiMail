@@ -214,9 +214,9 @@ class TestInviteOperations:
         assert invite["created_by"] == user_id
         assert invite["redeemed_by"] is None
 
-        tmp_db.redeem_invite(invite_id, user_id=999)
+        tmp_db.redeem_invite(invite_id, user_id=user_id)
         invite = tmp_db.get_invite_by_code("invitecode42")
-        assert invite["redeemed_by"] == 999
+        assert invite["redeemed_by"] == user_id
 
 
 class TestProcessedEmails:
@@ -227,6 +227,11 @@ class TestProcessedEmails:
         assert tmp_db.is_email_notified("acct@test.com", "UID123") is True
         assert tmp_db.is_email_notified("acct@test.com", "UID999") is False
 
-        # delete_old_emails with 0 days should delete everything
+        # Backdate the record so delete_old_emails can find it
+        conn = tmp_db._get_conn()
+        conn.execute(
+            "UPDATE processed_emails SET processed_date = '2000-01-01 00:00:00' "
+            "WHERE email_account = 'acct@test.com' AND uid = 'UID123'")
+        conn.commit()
         tmp_db.delete_old_emails(days=0)
         assert tmp_db.is_email_notified("acct@test.com", "UID123") is False
