@@ -1,4 +1,4 @@
-# NotiMail v3 Docker Configuration
+# UP Bridge Docker Configuration
 #
 # Mount this file to /app/config/config.ini in the container.
 # Email accounts are managed via the web dashboard or REST API

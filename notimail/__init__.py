@@ -1,7 +1,7 @@
 """
-NotiMail - Email notification service via IMAP IDLE.
+UP Bridge - IMAP IDLE to UnifiedPush bridge.
 
-This package contains the modular components of NotiMail:
+This package contains the modular components of UP Bridge:
 - config: Configuration loading and validation
 - crypto: Fernet encryption for credential storage
 - database: SQLite database operations and schema management

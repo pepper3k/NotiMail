@@ -67,8 +67,8 @@ def _send_reauth_push(notifier: Optional[Notifier], account_name: str, account_i
                 if is_up:
                     data = json.dumps({"type": "reauth", "account_id": account_id}).encode('utf-8')
                 else:
-                    headers["Title"] = "NotiMail Re-authentication Required"
-                    data = f"NotiMail needs re-authentication for account {account_name}".encode('utf-8')
+                    headers["Title"] = "UP Bridge Re-authentication Required"
+                    data = f"UP Bridge needs re-authentication for account {account_name}".encode('utf-8')
 
                 try:
                     response = requests.post(ntfy_url, data=data, headers=headers)
@@ -83,7 +83,7 @@ def _send_reauth_push(notifier: Optional[Notifier], account_name: str, account_i
             # For non-ntfy providers, send as a regular notification
             try:
                 provider.send_notification(
-                    "NotiMail Re-authentication",
+                    "UP Bridge Re-authentication",
                     f"Re-authentication needed for account {account_name}")
             except Exception as e:
                 logging.error(f"Error sending reauth notification: {e}")
@@ -710,7 +710,7 @@ class MultiIMAPHandler:
                         headers: dict = {}
                         if ntfy_token:
                             headers["Authorization"] = f"Bearer {ntfy_token}"
-                        headers["Title"] = "NotiMail: Manual Re-authentication Required"
+                        headers["Title"] = "UP Bridge: Manual Re-authentication Required"
                         headers["Click"] = reauth_url
                         data = (
                             f"Auto re-authentication failed for "
@@ -729,7 +729,7 @@ class MultiIMAPHandler:
                 else:
                     try:
                         provider.send_notification(
-                            "NotiMail: Manual Re-authentication Required",
+                            "UP Bridge: Manual Re-authentication Required",
                             f"Auto re-authentication failed for "
                             f"{handler.account_name or handler.email_user}. "
                             f"Use this link to re-authenticate: {reauth_url}")

@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         - test_config (bool): Whether to run a configuration test.
         - list_folders (bool): Whether to list IMAP folders and exit.
     """
-    parser = argparse.ArgumentParser(description='NotiMail Notification Service.')
+    parser = argparse.ArgumentParser(description='UP Bridge - IMAP to UnifiedPush notification service.')
     parser.add_argument('-c', '--config', type=str, default='config.ini',
                         help='Path to the configuration file.')
     parser.add_argument('--print-config', action='store_true',

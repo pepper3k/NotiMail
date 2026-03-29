@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Login - NotiMail{% endblock %}
+{% block title %}Login - UP Bridge{% endblock %}
 {% block content %}
 <div style="max-width: 400px; margin: 80px auto;">
     <div class="card">
-        <h2 style="margin-bottom: 20px;">NotiMail Login</h2>
+        <h2 style="margin-bottom: 20px;">UP Bridge Login</h2>
         <form method="POST" action="{{ url_for('web.login') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() if csrf_token is defined else '' }}">
             <label for="username">Username</label>

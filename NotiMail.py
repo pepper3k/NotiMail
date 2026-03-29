@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-NotiMail
+UP Bridge (NotiMail fork)
 Version: 3.0.0
 Author: Stefano Marinelli <stefano@dragas.it>
 License: BSD 3-Clause License
 
-NotiMail monitors email inboxes via IMAP IDLE and sends push notifications
+UP Bridge monitors email inboxes via IMAP IDLE and sends push notifications
 when new mail arrives. v3 adds encrypted credential storage, user management,
 a web dashboard with login, and a REST API for mail client registration.
 """
@@ -187,7 +187,7 @@ def main():
     limits_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'known_host_limits.ini')
     host_limits = HostLimitManager(limits_path)
 
-    logging.info("NotiMail v3 starting...")
+    logging.info("UP Bridge v3 starting...")
 
     # Create and start Flask web app
     flask_host = config.get('GENERAL', 'FlaskHost', fallback=None)
@@ -291,7 +291,7 @@ def test_config():
     logging.info("Testing notification providers...")
     global_providers = parse_notification_providers(config, errors_metric=metrics['ERRORS'])
     if global_providers:
-        Notifier(global_providers).send_notification("Test Sender", "Test Notification from NotiMail")
+        Notifier(global_providers).send_notification("Test Sender", "Test Notification from UP Bridge")
         logging.info("Test notification sent successfully!")
     else:
         logging.info("No global notification providers configured.")
@@ -339,7 +339,7 @@ def setup_admin():
         print("Admin user already exists. Use the web dashboard to manage users.")
         sys.exit(0)
 
-    print("=== NotiMail Admin Setup ===")
+    print("=== UP Bridge Admin Setup ===")
     username = input("Admin username: ").strip()
     if not username:
         print("Error: username cannot be empty.")
