@@ -1,9 +1,9 @@
 services:
-  notimail:
-    image: ghcr.io/pepper3k/notimail:v3.0
+  up-bridge:
+    image: ghcr.io/pepper3k/up-bridge:v3.0
     # To build locally instead, comment out 'image' and uncomment 'build':
     # build: .
-    container_name: notimail
+    container_name: up-bridge
     restart: unless-stopped
     volumes:
       - ./config:/app/config
