@@ -1,119 +1,105 @@
-# NotiMail 📧
+# UP Bridge
 
-**Version 2.0 is here!**
+IMAP IDLE to UnifiedPush bridge with encrypted credentials, multi-user management, and memory-only credential mode.
 
-Stay connected without constantly draining your battery. Introducing **NotiMail** – the future of server-side email notifications that supports multiple push providers, multiple email accounts, a web interface for monitoring, Prometheus metrics, dynamic configuration reload, and robust startup checks!
+UP Bridge is a fork of [NotiMail](https://github.com/draga79/NotiMail) by Stefano Marinelli, rebranded and extended with v3 features.
 
-## What's New in 2.0 🚀
-- **Web Interface (Flask)**: Securely monitor your email accounts, view real-time status, logs, and configuration via a browser.
-- **Prometheus Metrics**: Export detailed email processing metrics (emails processed, notifications sent, processing time, errors) for monitoring and alerting.
-- **Dynamic Configuration Reload**: Reload your configuration on the fly (via SIGHUP) without needing to restart the script.
-- **Enhanced Logging**: Efficient log management with rotation and an integrated web interface to view recent logs.
-- **Robust Startup Checks**: Immediate tests on log file writing, database operations, and test notifications with errors printed to both stdout and log.
-- **Backward Compatibility**: All features from previous versions are still supported.
+## Features
 
-## Features 🌟
-- **Multi-Account Monitoring**: Monitor multiple email accounts and folders seamlessly.
-- **Email Processing & Notification**: Automatically process new emails and send notifications containing the sender and subject.
-- **Multiple Push Providers**: Support for NTFY, Gotify, Pushover, and Apprise (if installed) notifications.
-- **Database Integration**: Uses SQLite3 to track processed emails and avoid duplicate notifications.
-- **Metrics & Monitoring**: Export valuable metrics to Prometheus for detailed insights.
-- **Thread-Safe Processing**: Handles multiple accounts and folders concurrently using threading.
-- **Web Interface**: Provides secure endpoints to check account status, view logs, and inspect configuration.
-- **Dynamic Config Reload**: Change settings on the fly without stopping the service.
-- **CLI Options**: Options like `--print-config`, `--test-config`, and `--list-folders` help verify and troubleshoot your setup.
-- **Startup Error Reporting**: Startup errors are logged and also printed to stdout for immediate feedback.
+- **IMAP IDLE monitoring** — push notifications for new email without polling
+- **UnifiedPush support** — signal-only mode sends empty push (no email content leaked)
+- **Encrypted credential storage** — Fernet encryption at rest, HMAC lookups
+- **Memory-only credential mode** — passwords never stored on disk, discarded after IMAP LOGIN
+- **Multi-user management** — invite-based registration, API keys, role-based access
+- **Web dashboard** — account management, connection status, system metrics
+- **REST API** — full CRUD for accounts, notifications, keys, invites
+- **Tiered brute-force protection** — gentle lockout for wrong passwords, aggressive for enumeration/spray
+- **Audit logging** — all admin actions logged with timestamps
+- **Host connection limits** — proactive per-IP caps for Yahoo, Gmail, Outlook etc.
+- **Auto-reauth** — push notification to re-authenticate after connection loss or restart
+- **Docker-ready** — pre-built images on GHCR, auto-generated config
 
-## Benefits 🚀
-- **Extended Battery Life**: Offload persistent IMAP connections to a server.
-- **Real-Time Notifications**: Get instant push notifications when new emails arrive.
-- **Reduced Data Consumption**: Process emails server-side, saving bandwidth on client devices.
-- **Resilient & Secure**: Built with robust error handling, secure IMAP SSL connections, and immediate startup tests.
+## Quick Start (Docker)
 
-## Installation Guide 🔧
+```bash
+# Create directory structure
+mkdir -p config data logs secrets
 
-### Prerequisites
-- **Python 3.6 or higher** is required.
-- For full feature support, install optional libraries such as **Flask**, **Prometheus Client**, and **Apprise**.
+# Start the container
+docker compose up -d
 
-### Step-by-Step Installation
+# Create admin user
+docker compose run --rm --entrypoint python up-bridge NotiMail.py -c /app/config/config.ini --setup-admin
 
-1. **Clone or Download the Repository**:
-    ```bash
-    git clone https://github.com/draga79/NotiMail.git
-    cd NotiMail
-    ```
+# Restart to apply
+docker compose restart
+```
 
-2. **Install Required Libraries**:  
-   Install the core dependencies. For example, on FreeBSD you might run:
-    ```bash
-    pkg install python311 py311-sqlite3 py311-requests py311-configparser py311-datetime py311-argparse
-    ```
-   For additional features, install these optional libraries:
-    - **Flask** (for the web interface):
-      ```bash
-      pkg install py311-flask
-      ```
-    - **Prometheus Client** (for metrics):
-      ```bash
-      pkg install py311-prometheus-client
-      ```
-    - **Apprise** (for extra notification services):
-      ```bash
-      pip install py311-apprise
-      ```
+Access the web dashboard at `http://your-server:8080/login`.
 
-3. **Configure NotiMail**:  
-   Edit the `config.ini` file to add your email accounts, folders, and notification provider settings. The configuration also allows you to set up the web interface (Flask), Prometheus metrics, and logging options.
+## docker-compose.yml
 
-4. **Run NotiMail**:
-    ```bash
-    python3.11 NotiMail.py
-    ```
+```yaml
+services:
+  up-bridge:
+    image: ghcr.io/pepper3k/up-bridge:v3.0
+    container_name: up-bridge
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./secrets:/app/secrets
+    ports:
+      - "8080:8080"
+```
 
-## Usage
+## Configuration
 
-- **Web Interface**:  
-  If Flask is installed and configured in your `config.ini` (with `FlaskHost` and `FlaskPort`), the web interface will be available at:
-  - `/status` – Get a detailed status of monitored email accounts (requires API key). Without an API key, the /status endpoint returns a simple status (OK or ERROR) indicating if all email accounts are connected and functioning properly.
-  - `/logs` – View the last 100 lines of logs (requires API key).
-  - `/config` – Display the current configuration with sensitive keys redacted (requires API key).
+On first run, a default `config.ini` is generated automatically. Key settings:
 
-- **Prometheus Metrics**:  
-  If the Prometheus client is installed and configured (set `PrometheusHost` and `PrometheusPort` in `config.ini`), NotiMail will export metrics such as:
-  - Total emails processed
-  - Total notifications sent
-  - Email processing time
-  - Total errors encountered
+| Setting | Default | Description |
+|---|---|---|
+| `FlaskHost` | `0.0.0.0` | Web interface bind address |
+| `FlaskPort` | `8080` | Web interface port |
+| `SecretKeyLocation` | `/app/secrets/secret.key` | Fernet encryption key (auto-generated) |
+| `DataBaseLocation` | `/app/data/notimail.db` | SQLite database path |
+| `SessionLifetimeHours` | `24` | Web session duration |
+| `InviteExpiryDays` | `7` | Invite code expiry |
 
-- **Dynamic Configuration Reload**:  
-  Send a SIGHUP signal to the running process to reload the configuration without restarting:
-    ```bash
-    kill -SIGHUP <process_id>
-    ```
+## REST API
 
-- **CLI Options**:  
-  - `--print-config`: Print the current configuration.
-  - `--test-config`: Run tests for connectivity and notification providers.
-  - `--list-folders`: List all available IMAP folders for each email account.
+All API endpoints require `Authorization: Bearer <api_key>`.
 
-## Troubleshooting
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET/POST` | `/api/accounts` | List or create email accounts |
+| `GET/PUT/DELETE` | `/api/accounts/<id>` | Manage a specific account |
+| `POST` | `/api/accounts/<id>/reauth` | Re-authenticate (memory-only mode) |
+| `GET/POST/DELETE` | `/api/accounts/<id>/notifications` | Notification configs |
+| `POST/GET` | `/api/keys` | Generate or list API keys |
+| `DELETE` | `/api/keys/<id>` | Revoke an API key |
+| `POST/GET` | `/api/invites` | Generate or list invite codes |
+| `GET` | `/api/status` | Connection status |
+| `GET` | `/health` | Health check (unauthenticated) |
 
-- **Missing Dependencies**:  
-  Ensure that all required and optional libraries are installed.
-  
-- **Flask/Prometheus Unavailable**:  
-  Verify that Flask and Prometheus client libraries are installed and properly configured in `config.ini`.
+## Memory-Only Credential Mode
 
-- **Configuration Errors**:  
-  Double-check the syntax of `config.ini` or use the `--test-config` option to validate your setup.
+When `credential_mode: 1` is set on an account, the IMAP password is:
+1. Used once for IMAP LOGIN
+2. Immediately discarded from memory
+3. Never stored on disk
 
-- **Startup Errors**:  
-  Errors during startup (log file, database, or test notification) will be printed to both stdout and the log. Address these immediately as the program will exit if they occur.
+If the connection drops, UP Bridge sends a push notification to the client to re-authenticate. After 3 failed auto-reauth attempts, a manual reauth link is sent via ntfy.
 
-## Changelog
-For a detailed list of changes, please refer to the [CHANGELOG.md](CHANGELOG.md).
+## Notification Providers
 
----
+- **ntfy** — with UnifiedPush signal-only mode (`?up=1`)
+- **Pushover**
+- **Gotify**
+- **Apprise** (100+ services)
 
-Enjoy smarter, more efficient email notifications with **NotiMail 2.0**!
+## Credits
+
+- Original [NotiMail](https://github.com/draga79/NotiMail) by [Stefano Marinelli](https://github.com/draga79)
+- Licensed under BSD 3-Clause License
