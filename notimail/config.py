@@ -1,5 +1,5 @@
 """
-Configuration loading and validation for NotiMail.
+Configuration loading and validation for UP Bridge.
 
 Handles reading config.ini, argument parsing, logging setup,
 and conditional imports of optional dependencies (Apprise, Flask, Prometheus).

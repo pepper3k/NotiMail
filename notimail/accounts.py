@@ -1,5 +1,5 @@
 """
-Account loading utilities for NotiMail.
+Account loading utilities for UP Bridge.
 
 Provides functions to load email accounts and their notification
 providers from the database, decrypting credentials at runtime.

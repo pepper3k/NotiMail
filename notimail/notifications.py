@@ -1,5 +1,5 @@
 """
-Notification providers for NotiMail.
+Notification providers for UP Bridge.
 
 Implements the strategy pattern for sending push notifications via
 multiple services: ntfy, Pushover, Gotify, and Apprise.

@@ -1,5 +1,5 @@
 """
-Cryptographic utilities for NotiMail.
+Cryptographic utilities for UP Bridge.
 
 Provides Fernet-based encryption/decryption for credential storage,
 HKDF-based key derivation for HMAC lookups and Flask session keys,
@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import hashes
 
 
 class CryptoManager:
-    """Manages Fernet encryption and HKDF-derived keys for NotiMail.
+    """Manages Fernet encryption and HKDF-derived keys for UP Bridge.
 
     On initialization, loads (or generates) a Fernet key from a file,
     then derives sub-keys for HMAC lookups and Flask sessions using HKDF.

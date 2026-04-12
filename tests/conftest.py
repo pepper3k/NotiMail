@@ -1,4 +1,4 @@
-"""Shared fixtures for the NotiMail test suite."""
+"""Shared fixtures for the UP Bridge test suite."""
 
 import hashlib
 import os

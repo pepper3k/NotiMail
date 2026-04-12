@@ -1,5 +1,5 @@
 """
-Database operations for NotiMail.
+Database operations for UP Bridge.
 
 Handles SQLite connection management, the processed_emails table,
 and schema migrations. Thread-safe via connection-per-thread using
@@ -93,7 +93,7 @@ class DatabaseHandler:
 
         Adds the email_account column and a unique index if they are
         missing. This handles upgrades from the single-account schema
-        used in NotiMail < 2.0.
+        used in UP Bridge < 2.0.
 
         Args:
             conn: An active SQLite connection.

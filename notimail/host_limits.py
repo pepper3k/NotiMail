@@ -1,5 +1,5 @@
 """
-Host connection limit management for NotiMail.
+Host connection limit management for UP Bridge.
 
 Reads known_host_limits.ini to proactively cap concurrent IMAP connections
 per host. Implements smart retry suppression for unknown hosts by detecting

@@ -1,5 +1,5 @@
 """
-Flask web interface for NotiMail.
+Flask web interface for UP Bridge.
 
 Provides the login page, dashboard, REST API endpoints, and session
 management. Uses flask-wtf for CSRF protection on web forms.

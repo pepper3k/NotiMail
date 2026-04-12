@@ -1,5 +1,5 @@
 """
-IMAP connection handlers for NotiMail.
+IMAP connection handlers for UP Bridge.
 
 Manages IMAP IDLE connections, email processing, multi-account
 orchestration, the connection watchdog, and memory-only credential

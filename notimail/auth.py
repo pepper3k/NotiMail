@@ -1,5 +1,5 @@
 """
-Authentication and authorization for NotiMail.
+Authentication and authorization for UP Bridge.
 
 Provides bcrypt password hashing, API key generation/validation,
 invite management, and tiered brute-force protection.
